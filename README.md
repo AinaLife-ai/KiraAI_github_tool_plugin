@@ -35,7 +35,7 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 ## 注意事项
 
-- 默认分支参数为 `main`，部分仓库（如 Alife）使用 `master`，调用时需指定 `b: "master"`
+- 默认分支参数为 `main`，部分仓库（如 [Alife](https://github.com/BDFFZI/Alife)）使用 `master`，调用时需指定 `b: "master"`
 - 搜索 query 中的空格/特殊字符自动 URL 编码
 - 跨平台兼容：Windows / Linux / macOS 均可运行
 - stdout 使用 UTF-8 解码，避免 GBK 乱码
