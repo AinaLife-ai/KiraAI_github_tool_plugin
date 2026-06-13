@@ -1,0 +1,11 @@
+{
+    "github_token": {
+        "name": "GitHub Token",
+        "type": "string",
+        "default": "",
+        "hint": "GitHub Personal Access Token (需有repo权限)",
+        "locales": {
+            "zh": { "name": "GitHub Token", "hint": "GitHub Personal Access Token（需要有 repo 权限）" }
+        }
+    }
+}
