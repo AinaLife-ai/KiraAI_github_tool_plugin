@@ -40,4 +40,4 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 ## 许可证
 
-MIT
+AGPL-3.0
