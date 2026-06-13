@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import subprocess
+import sys
 from typing import Optional, Any
 from urllib.parse import quote
 
@@ -13,9 +14,12 @@ logger = get_logger("github-tool", "green")
 
 _github_token: str = ""
 
+# Windows用curl.exe，其他平台（Linux/macOS）用curl
+_CURL_CMD = "curl.exe" if sys.platform == "win32" else "curl"
+
 
 def _curl(args: list[str], timeout: int = 30) -> tuple[int, str]:
-    cmd = ["curl.exe", "-s", "-H", "Accept: application/vnd.github+json"] + args
+    cmd = [_CURL_CMD, "-s", "-H", "Accept: application/vnd.github+json"] + args
     try:
         r = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
         out = r.stdout.decode("utf-8", errors="replace").strip()
@@ -90,6 +94,10 @@ def _fmt(raw: str) -> str:
         return "\n".join(lines) if lines else "Empty list"
     return str(data)[:500]
 
+
+# ============================================================
+# Tools
+# ============================================================
 
 @register.tool(
     name="github_search",
