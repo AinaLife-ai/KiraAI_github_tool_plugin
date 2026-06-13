@@ -28,15 +28,17 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 ## 工作原理
 
-- 所有 API 调用走 `curl.exe`，不依赖 `PyGithub`、`httpx` 等第三方库
-- 只依赖 Python 标准库 + Windows 自带的 `curl.exe`
+- 所有 API 调用走 `curl`，无需 `PyGithub`、`httpx` 等第三方库
+- 仅依赖 Python 标准库 + 系统自带 `curl`
+- 自动识别运行平台：Windows 使用 `curl.exe`，Linux/macOS 使用 `curl`
 - 输出精简为 token 友好的格式，避免 LLM 上下文被刷爆
 
 ## 注意事项
 
 - 默认分支参数为 `main`，部分仓库（如 Alife）使用 `master`，调用时需指定 `b: "master"`
 - 搜索 query 中的空格/特殊字符自动 URL 编码
-- Windows 环境下 subprocess 的 stdout 使用 UTF-8 解码，避免 GBK 乱码
+- 跨平台兼容：Windows / Linux / macOS 均可运行
+- stdout 使用 UTF-8 解码，避免 GBK 乱码
 
 ## 许可证
 
