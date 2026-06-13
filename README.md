@@ -46,4 +46,4 @@ AGPL-3.0
 
 ---
 
-⭐ 如果你觉得这个插件有用，不妨试试 `github_create(act="star", o="AinaLife-ai", r="KiraAI_github_tool_plugin")` —— 自己给自己点一个星，GitHub 史上最卷的 Star 获取方式。
+⭐ 觉得好用？不妨用本插件的点赞功能给本项目点个星，绝对安全无后门，唯一的副作用是让作者开心一整天。
