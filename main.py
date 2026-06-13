@@ -96,7 +96,8 @@ def _fmt(raw: str) -> str:
 
 
 # ============================================================
-# Tools
+# Tools — 注意：函数参数名不要跟任何可能的系统保留字冲突
+# 解决方案：全部使用 **kwargs 手动提取
 # ============================================================
 
 @register.tool(
@@ -213,7 +214,7 @@ async def github_list(*args, **kw):
     params={
         "type": "object",
         "properties": {
-            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review"], "description": "What type of resource to create"},
+            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star"], "description": "What type of resource to create"},
             "o": {"type": "string", "description": "Repository owner"},
             "r": {"type": "string", "description": "Repository name"},
             "nm": {"type": "string", "description": "Name (repo name, branch name)"},
@@ -321,6 +322,13 @@ async def github_create(*args, **kw):
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls/{pn}/reviews")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
 
+    elif act == "star":
+        rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Length: 0",
+                         _url(f"/user/starred/{o}/{r}")])
+        if rc == 0:
+            return f"⭐ Starred {o}/{r} successfully"
+        return f"Star failed (code {rc}): {out[:200]}"
+
     return f"Unknown action: {act}"
 
 
@@ -353,8 +361,8 @@ async def github_update(*args, **kw):
     act = kw.get("act", "")
     o = kw.get("o", "")
     r = kw.get("r", "")
-    inn = kw.get("in", 0)
-    pn = kw.get("pn", 0)
+    inn = kw.get("in", 0)  # issue number
+    pn = kw.get("pn", 0)   # PR number
     ti = kw.get("ti", "")
     bd = kw.get("bd", "")
     st = kw.get("st", "")
