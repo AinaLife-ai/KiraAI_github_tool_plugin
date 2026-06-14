@@ -17,6 +17,15 @@
             "zh": { "name": "启用自动监控", "hint": "是否开启PR/Issue自动检查" }
         }
     },
+    "watch_search_mode": {
+        "name": "全量搜索模式",
+        "type": "boolean",
+        "default": false,
+        "hint": "开启后不按仓库列表扫描，直接搜所有我提的PR和Issue（跨仓库全量）",
+        "locales": {
+            "zh": { "name": "全量搜索模式", "hint": "开启后不按仓库列表扫描，直接搜所有我提的PR和Issue（跨仓库全量）" }
+        }
+    },
     "watch_interval_type": {
         "name": "定时模式",
         "type": "select",
@@ -45,18 +54,18 @@
         "name": "监控所有自有仓库",
         "type": "boolean",
         "default": true,
-        "hint": "自动监控token所属用户的所有仓库",
+        "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）",
         "locales": {
-            "zh": { "name": "监控所有自有仓库", "hint": "自动监控token所属用户的所有仓库" }
+            "zh": { "name": "监控所有自有仓库", "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）" }
         }
     },
     "watch_repos": {
         "name": "额外监控仓库",
         "type": "string",
         "default": "",
-        "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo",
+        "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo（search_mode关闭时生效）",
         "locales": {
-            "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo" }
+            "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo（search_mode关闭时生效）" }
         }
     },
     "watch_issues": {
