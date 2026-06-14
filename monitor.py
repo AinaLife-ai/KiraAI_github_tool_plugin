@@ -1,6 +1,7 @@
 """
 GitHub Auto-Watch Monitor
 定时检查PR/Issue评论，自动回应或请求确认
+支持 search mode：全量搜索我的所有 PR/Issue vs 按仓库列表扫描
 """
 import asyncio
 import json
@@ -8,6 +9,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Optional, Callable
+from urllib.parse import quote
 
 _CURL_CMD = "curl.exe" if sys.platform == "win32" else "curl"
 
@@ -42,6 +44,7 @@ class GitHubMonitor:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._last_check: dict[str, str] = {}
+        self._me: str = ""
 
     def c(self, key: str, default=None):
         return self.plugin.plugin_cfg.get(f"watch_{key}", default)
@@ -53,10 +56,20 @@ class GitHubMonitor:
     async def start(self):
         if not self.enabled:
             return
+        # 先获取当前用户名
+        rc, out = _curl(["-H", _auth(self._token), _url("/user")])
+        if rc == 0:
+            try:
+                self._me = json.loads(out).get("login", "")
+            except json.JSONDecodeError:
+                pass
+        if not self._me:
+            return
+
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger = self.plugin.logger
-        logger.info("[Monitor] Auto-watch started")
+        logger.info(f"[Monitor] Auto-watch started (user: {self._me}, search_mode: {self.c('search_mode', False)})")
 
     async def stop(self):
         self._running = False
@@ -81,158 +94,283 @@ class GitHubMonitor:
             await asyncio.sleep(minutes * 60)
 
     async def _check_all(self):
-        repos = list(self.c("repos", []))
-        own_repos = self.c("own_repos", True)
+        search_mode = self.c("search_mode", False)
 
-        if own_repos:
-            rc, out = _curl(["-H", _auth(self._token),
-                             _url("/user/repos?per_page=100&type=owner&sort=updated")])
-            if rc == 0:
-                try:
-                    data = json.loads(out)
-                    for repo in data:
-                        full = repo.get("full_name", "")
-                        if full and full not in repos:
-                            repos.append(full)
-                except json.JSONDecodeError:
-                    pass
+        if search_mode:
+            # 全量搜索模式 — 搜所有我提的PR和分配给/提到我的Issue
+            await self._search_my_prs()
+            if self.c("watch_issues", True):
+                await self._search_my_issues()
+        else:
+            # 仓库扫描模式 — 按配置的仓库列表扫描
+            repos = list(self.c("repos", []))
+            if self.c("own_repos", True):
+                rc, out = _curl(["-H", _auth(self._token),
+                                 _url("/user/repos?per_page=100&type=owner&sort=updated")])
+                if rc == 0:
+                    try:
+                        data = json.loads(out)
+                        for repo in data:
+                            full = repo.get("full_name", "")
+                            if full and full not in repos:
+                                repos.append(full)
+                    except json.JSONDecodeError:
+                        pass
 
-        for full_name in repos:
-            if "/" not in full_name:
-                continue
-            owner, name = full_name.split("/", 1)
-            await self._check_repo(owner, name)
+            for full_name in repos:
+                if "/" not in full_name:
+                    continue
+                owner, name = full_name.split("/", 1)
+                await self._scan_repo_prs(owner, name)
+                if self.c("watch_issues", True):
+                    await self._scan_repo_issues(owner, name)
 
-    async def _get_me(self) -> str:
-        rc, out = _curl(["-H", _auth(self._token), _url("/user")])
+    # ========== Search Mode ==========
+
+    async def _search_my_prs(self):
+        """通过 Search API 搜所有我提的 open PR"""
+        q = f"author:{self._me} type:pr state:open"
+        rc, out = _curl(["-H", _auth(self._token),
+                         _url(f"/search/issues?q={quote(q)}&per_page=50&sort=updated")])
         if rc != 0:
-            return ""
+            return
         try:
-            return json.loads(out).get("login", "")
+            data = json.loads(out)
+            items = data.get("items", [])
         except json.JSONDecodeError:
-            return ""
-
-    async def _check_repo(self, owner: str, name: str):
-        me = await self._get_me()
-        if not me:
             return
 
         notify_target = self.c("notify_target", "")
         auto_fix = self.c("auto_fix", False)
         require_confirm = self.c("require_confirm", True)
 
-        # 检查我的PR是否有新的review comments
+        for pr in items:
+            # 解析仓库信息
+            repo_url = pr.get("repository_url", "")
+            parts = repo_url.strip("/").split("/")
+            if len(parts) < 2:
+                continue
+            owner, name = parts[-2], parts[-1]
+            pr_num = pr["number"]
+            pr_title = pr["title"]
+            pr_url = pr.get("html_url", "")
+
+            # 获取 review comments
+            rc2, out2 = _curl(["-H", _auth(self._token),
+                              _url(f"/repos/{owner}/{name}/pulls/{pr_num}/comments")])
+            if rc2 != 0:
+                continue
+
+            try:
+                comments = json.loads(out2)
+            except json.JSONDecodeError:
+                continue
+
+            last_key = f"pr_{owner}_{name}_{pr_num}"
+            last = self._last_check.get(last_key, "")
+            new_comments = [c for c in comments
+                            if c.get("user", {}).get("login") != self._me
+                            and c.get("created_at", "") > last]
+
+            if not new_comments:
+                continue
+
+            self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
+
+            lines = [f"📮 PR #{pr_num} 「{pr_title}」收到新的审查意见"]
+            for c in new_comments:
+                user = c.get("user", {}).get("login", "?")
+                body = c.get("body", "")[:300]
+                path = c.get("path", "")
+                lines.append(f"  💬 {user}: {body}")
+                if path:
+                    lines.append(f"    📄 {path}")
+            lines.append(f"  🔗 {pr_url}")
+            summary = "\n".join(lines)
+
+            if notify_target and self._notify:
+                await self._notify(summary, "review", notify_target)
+
+            if auto_fix and not require_confirm:
+                await self._auto_fix_pr(owner, name, pr_num, new_comments)
+
+    async def _search_my_issues(self):
+        """通过 Search API 搜分配给或提到我的 Issue"""
+        q = f"assignee:{self._me} state:open type:issue"
+        rc, out = _curl(["-H", _auth(self._token),
+                         _url(f"/search/issues?q={quote(q)}&per_page=50&sort=updated")])
+        if rc != 0:
+            return
+        try:
+            data = json.loads(out)
+            items = data.get("items", [])
+        except json.JSONDecodeError:
+            return
+
+        notify_target = self.c("notify_target", "")
+
+        for issue in items:
+            repo_url = issue.get("repository_url", "")
+            parts = repo_url.strip("/").split("/")
+            if len(parts) < 2:
+                continue
+            owner, name = parts[-2], parts[-1]
+            issue_num = issue["number"]
+            issue_title = issue["title"]
+            issue_url = issue.get("html_url", "")
+
+            rc2, out2 = _curl(["-H", _auth(self._token),
+                              _url(f"/repos/{owner}/{name}/issues/{issue_num}/comments")])
+            if rc2 != 0:
+                continue
+
+            try:
+                comments = json.loads(out2)
+            except json.JSONDecodeError:
+                continue
+
+            last_key = f"issue_{owner}_{name}_{issue_num}"
+            last = self._last_check.get(last_key, "")
+            new_comments = [c for c in comments
+                            if c.get("user", {}).get("login") != self._me
+                            and c.get("created_at", "") > last]
+
+            if not new_comments:
+                continue
+
+            self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
+
+            lines = [f"📮 Issue #{issue_num} 「{issue_title}」有新的回复"]
+            for c in new_comments:
+                user = c.get("user", {}).get("login", "?")
+                body = c.get("body", "")[:300]
+                lines.append(f"  💬 {user}: {body}")
+            lines.append(f"  🔗 {issue_url}")
+            summary = "\n".join(lines)
+
+            if notify_target and self._notify:
+                await self._notify(summary, "issue", notify_target)
+
+    # ========== Repo Scan Mode ==========
+
+    async def _scan_repo_prs(self, owner: str, name: str):
+        notify_target = self.c("notify_target", "")
+        auto_fix = self.c("auto_fix", False)
+        require_confirm = self.c("require_confirm", True)
+
         rc, out = _curl(["-H", _auth(self._token),
                          _url(f"/repos/{owner}/{name}/pulls?state=open&per_page=20")])
-        if rc == 0:
+        if rc != 0:
+            return
+
+        try:
+            prs = json.loads(out)
+        except json.JSONDecodeError:
+            return
+
+        for pr in prs:
+            if pr.get("user", {}).get("login") != self._me:
+                continue
+
+            pr_num = pr["number"]
+            pr_title = pr["title"]
+            pr_url = pr.get("html_url", "")
+
+            rc2, out2 = _curl(["-H", _auth(self._token),
+                              _url(f"/repos/{owner}/{name}/pulls/{pr_num}/comments")])
+            if rc2 != 0:
+                continue
+
             try:
-                prs = json.loads(out)
-                for pr in prs:
-                    if pr.get("user", {}).get("login") == me:
-                        await self._check_pr(owner, name, pr, me, notify_target, auto_fix, require_confirm)
+                comments = json.loads(out2)
             except json.JSONDecodeError:
-                pass
+                continue
 
-        # 检查分配给自己的issue
-        if self.c("watch_issues", True):
-            rc, out = _curl(["-H", _auth(self._token),
-                             _url(f"/repos/{owner}/{name}/issues?state=open&per_page=20&assignee={me}")])
-            if rc == 0:
-                try:
-                    issues = json.loads(out)
-                    for issue in issues:
-                        if "pull_request" not in issue:
-                            await self._check_issue(owner, name, issue, me, notify_target)
-                except json.JSONDecodeError:
-                    pass
+            last_key = f"pr_{owner}_{name}_{pr_num}"
+            last = self._last_check.get(last_key, "")
+            new_comments = [c for c in comments
+                            if c.get("user", {}).get("login") != self._me
+                            and c.get("created_at", "") > last]
 
-    async def _check_pr(self, owner: str, name: str, pr: dict, me: str,
-                        notify_target: str, auto_fix: bool, require_confirm: bool):
-        pr_num = pr["number"]
-        pr_title = pr["title"]
-        pr_url = pr.get("html_url", "")
-        full = f"{owner}/{name}"
+            if not new_comments:
+                continue
 
-        # 获取review comments
+            self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
+
+            lines = [f"📮 PR #{pr_num} 「{pr_title}」收到新的审查意见"]
+            for c in new_comments:
+                user = c.get("user", {}).get("login", "?")
+                body = c.get("body", "")[:300]
+                path = c.get("path", "")
+                lines.append(f"  💬 {user}: {body}")
+                if path:
+                    lines.append(f"    📄 {path}")
+            lines.append(f"  🔗 {pr_url}")
+            summary = "\n".join(lines)
+
+            if notify_target and self._notify:
+                await self._notify(summary, "review", notify_target)
+
+            if auto_fix and not require_confirm:
+                await self._auto_fix_pr(owner, name, pr_num, new_comments)
+
+    async def _scan_repo_issues(self, owner: str, name: str):
+        notify_target = self.c("notify_target", "")
+
         rc, out = _curl(["-H", _auth(self._token),
-                         _url(f"/repos/{owner}/{name}/pulls/{pr_num}/comments")])
+                         _url(f"/repos/{owner}/{name}/issues?state=open&per_page=20&assignee={self._me}")])
         if rc != 0:
             return
 
         try:
-            comments = json.loads(out)
+            issues = json.loads(out)
         except json.JSONDecodeError:
             return
 
-        last_key = f"pr_{owner}_{name}_{pr_num}"
-        last = self._last_check.get(last_key, "")
-        new_comments = [c for c in comments
-                        if c.get("user", {}).get("login") != me
-                        and c.get("created_at", "") > last]
+        for issue in issues:
+            if "pull_request" in issue:
+                continue
 
-        if not new_comments:
-            return
+            issue_num = issue["number"]
+            issue_title = issue["title"]
+            issue_url = issue.get("html_url", "")
 
-        self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
+            rc2, out2 = _curl(["-H", _auth(self._token),
+                              _url(f"/repos/{owner}/{name}/issues/{issue_num}/comments")])
+            if rc2 != 0:
+                continue
 
-        # 构建通知
-        lines = [f"📮 PR #{pr_num} 「{pr_title}」收到新的审查意见"]
-        for c in new_comments:
-            user = c.get("user", {}).get("login", "?")
-            body = c.get("body", "")[:300]
-            path = c.get("path", "")
-            lines.append(f"  💬 {user}: {body}")
-            if path:
-                lines.append(f"    📄 {path}")
-        lines.append(f"  🔗 {pr_url}")
-        summary = "\n".join(lines)
+            try:
+                comments = json.loads(out2)
+            except json.JSONDecodeError:
+                continue
 
-        if notify_target and self._notify:
-            await self._notify(summary, "review", notify_target)
+            last_key = f"issue_{owner}_{name}_{issue_num}"
+            last = self._last_check.get(last_key, "")
+            new_comments = [c for c in comments
+                            if c.get("user", {}).get("login") != self._me
+                            and c.get("created_at", "") > last]
 
-        # 自动修复模式
-        if auto_fix and not require_confirm:
-            await self._auto_fix_pr(owner, name, pr_num, new_comments, me)
+            if not new_comments:
+                continue
 
-    async def _check_issue(self, owner: str, name: str, issue: dict, me: str, notify_target: str):
-        issue_num = issue["number"]
-        issue_title = issue["title"]
-        issue_url = issue.get("html_url", "")
+            self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
 
-        rc, out = _curl(["-H", _auth(self._token),
-                         _url(f"/repos/{owner}/{name}/issues/{issue_num}/comments")])
-        if rc != 0:
-            return
+            lines = [f"📮 Issue #{issue_num} 「{issue_title}」有新的回复"]
+            for c in new_comments:
+                user = c.get("user", {}).get("login", "?")
+                body = c.get("body", "")[:300]
+                lines.append(f"  💬 {user}: {body}")
+            lines.append(f"  🔗 {issue_url}")
+            summary = "\n".join(lines)
 
-        try:
-            comments = json.loads(out)
-        except json.JSONDecodeError:
-            return
+            if notify_target and self._notify:
+                await self._notify(summary, "issue", notify_target)
 
-        last_key = f"issue_{owner}_{name}_{issue_num}"
-        last = self._last_check.get(last_key, "")
-        new_comments = [c for c in comments
-                        if c.get("user", {}).get("login") != me
-                        and c.get("created_at", "") > last]
-
-        if not new_comments:
-            return
-
-        self._last_check[last_key] = datetime.now(timezone.utc).isoformat()
-
-        lines = [f"📮 Issue #{issue_num} 「{issue_title}」有新的回复"]
-        for c in new_comments:
-            user = c.get("user", {}).get("login", "?")
-            body = c.get("body", "")[:300]
-            lines.append(f"  💬 {user}: {body}")
-        lines.append(f"  🔗 {issue_url}")
-        summary = "\n".join(lines)
-
-        if notify_target and self._notify:
-            await self._notify(summary, "issue", notify_target)
+    # ========== Auto Fix ==========
 
     async def _auto_fix_pr(self, owner: str, name: str, pr_num: int,
-                           comments: list[dict], me: str):
+                           comments: list[dict]):
         """自动根据review意见修改代码（预留实现）"""
         logger = self.plugin.logger
         logger.info(f"[Monitor] Auto-fix triggered for {owner}/{name}#{pr_num}")
