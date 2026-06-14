@@ -1,535 +1,622 @@
-import asyncio
-import base64
+"""
+GitHub Tool Plugin for KiraAI
+curl 直调 GitHub REST API，零 MCP 桥接
+"""
 import json
-import subprocess
-import sys
-from typing import Optional, Any
-from urllib.parse import quote
-
+import re
+from pathlib import Path
+from typing import Any, Optional
 from core.plugin import BasePlugin
-from core.plugin.plugin_registry import register
 from core.logging_manager import get_logger
 
-from .monitor import GitHubMonitor
-
-logger = get_logger("github-tool", "green")
-
-_github_token: str = ""
-
-# Windows用curl.exe，其他平台（Linux/macOS）用curl
-_CURL_CMD = "curl.exe" if sys.platform == "win32" else "curl"
-
-# 后台监控器实例
-_monitor: Optional[GitHubMonitor] = None
+logger = get_logger("github-tool", "blue")
 
 
-def _curl(args: list[str], timeout: int = 30) -> tuple[int, str]:
-    cmd = [_CURL_CMD, "-s", "-H", "Accept: application/vnd.github+json"] + args
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
-        out = r.stdout.decode("utf-8", errors="replace").strip()
-        return r.returncode, out
-    except subprocess.TimeoutExpired:
-        return -1, '{"error": "curl timeout"}'
-    except Exception as e:
-        return -1, json.dumps({"error": str(e)})
+class GitHubClient:
+    """Curl-based GitHub REST client, zero third-party deps"""
 
+    def __init__(self, token: str):
+        self._token = token
+        import sys
+        self._curl = "curl.exe" if sys.platform == "win32" else "curl"
 
-def _url(path: str) -> str:
-    return f"https://api.github.com{path}"
-
-
-def _auth() -> str:
-    return f"Authorization: token {_github_token}"
-
-
-def _check() -> str:
-    if not _github_token:
-        return "GitHub Token 未配置，请在 WebUI 插件设置中填写"
-    return ""
-
-
-def _fmt(raw: str) -> str:
-    if not raw:
-        return "No output"
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw[:500]
-    if isinstance(data, dict):
-        if "message" in data and "documentation_url" in data:
-            return f"Error: {data['message']}"
-        if "total_count" in data:
-            items = data.get("items", [])
-            lines = [f"Total: {data['total_count']}"]
-            for i in items[:10]:
-                n = i.get("full_name") or i.get("name") or i.get("login", "?")
-                u = i.get("html_url") or ""
-                lines.append(f"  {n} {u}")
-            if len(items) > 10:
-                lines.append(f"  ... and {len(items) - 10} more")
-            return "\n".join(lines)
-        if isinstance(data.get("content"), dict) and "sha" in data["content"]:
-            return f"sha: {data['content']['sha']}"
-        for k in ["sha", "full_name", "name"]:
-            if k in data:
-                v = data[k]
-                if k == "full_name":
-                    return f"{v} {data.get('html_url', '')}"
-                if k == "sha":
-                    return f"sha: {v}"
-                if k == "name":
-                    return f"{v} {data.get('html_url', '')}"
-        if "commit" in data and "sha" in data:
-            return f"sha: {data['sha']} {data['commit'].get('message','')[:60]}"
-        if "id" in data:
-            for k in ["title", "name", "login", "message"]:
-                if k in data:
-                    return str(data[k])[:200]
-        return json.dumps(data, ensure_ascii=False)[:500]
-    elif isinstance(data, list):
-        lines = []
-        for item in data[:20]:
-            n = item.get("full_name") or item.get("name") or item.get("title") or item.get("filename") or item.get("login", "?")
-            u = item.get("html_url") or ""
-            lines.append(f"  {n} {u}")
-        if len(data) > 20:
-            lines.append(f"  ... and {len(data) - 20} more")
-        return "\n".join(lines) if lines else "Empty list"
-    return str(data)[:500]
-
-
-# ============================================================
-# Tools — 使用 **kwargs 手动提取，避免关键字冲突
-# ============================================================
-
-@register.tool(
-    name="github_search",
-    description="Search GitHub (repositories, code, issues, users). Use when user wants to search for repos, code, issues on GitHub. Returns concise token-efficient results.",
-    params={
-        "type": "object",
-        "properties": {
-            "q": {"type": "string", "description": "Search query using GitHub search syntax"},
-            "t": {"type": "string", "enum": ["repositories", "code", "issues", "users"], "description": "What to search for"},
-            "n": {"type": "integer", "description": "Results per page (max 100)", "default": 10}
-        },
-        "required": ["t", "q"]
-    }
-)
-async def github_search(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    t = kw.get("t", "repositories")
-    q = kw.get("q", "")
-    n = min(kw.get("n", 10), 100)
-    rc, out = _curl(["-H", _auth(), _url(f"/search/{t}?q={quote(q)}&per_page={n}")])
-    return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
-
-@register.tool(
-    name="github_get",
-    description="Get content from GitHub: file contents, issue details, pull request details, PR files, PR status, PR comments, PR reviews.",
-    params={
-        "type": "object",
-        "properties": {
-            "t": {"type": "string", "enum": ["contents", "issue", "pull_request", "pull_request_files", "pull_request_status", "pull_request_comments", "pull_request_reviews"], "description": "Type of resource to get"},
-            "o": {"type": "string", "description": "Repository owner (username or organization)"},
-            "r": {"type": "string", "description": "Repository name"},
-            "p": {"type": "string", "description": "File path (for contents)"},
-            "i": {"type": "integer", "description": "Issue number"},
-            "n": {"type": "integer", "description": "Pull request number"},
-            "b": {"type": "string", "description": "Branch ref (default: main)", "default": "main"}
-        },
-        "required": ["t", "o", "r"]
-    }
-)
-async def github_get(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    t = kw.get("t", "")
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    p = kw.get("p", "")
-    i = kw.get("i", 0)
-    n = kw.get("n", 0)
-    b = kw.get("b", "main")
-    ep_map = {
-        "contents": f"/repos/{o}/{r}/contents/{p}?ref={b}",
-        "issue": f"/repos/{o}/{r}/issues/{i}",
-        "pull_request": f"/repos/{o}/{r}/pulls/{n}",
-        "pull_request_files": f"/repos/{o}/{r}/pulls/{n}/files",
-        "pull_request_status": f"/repos/{o}/{r}/commits/{b}/status",
-        "pull_request_comments": f"/repos/{o}/{r}/pulls/{n}/comments",
-        "pull_request_reviews": f"/repos/{o}/{r}/pulls/{n}/reviews",
-    }
-    ep = ep_map.get(t)
-    if not ep:
-        return f"Unknown target: {t}"
-    rc, out = _curl(["-H", _auth(), _url(ep)])
-    return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
-
-@register.tool(
-    name="github_list",
-    description="List commits, issues or pull requests from a GitHub repository.",
-    params={
-        "type": "object",
-        "properties": {
-            "t": {"type": "string", "enum": ["commits", "issues", "pull_requests"], "description": "What to list"},
-            "o": {"type": "string", "description": "Repository owner"},
-            "r": {"type": "string", "description": "Repository name"},
-            "s": {"type": "string", "enum": ["open", "closed", "all"], "description": "Filter by state (issues/PRs only)", "default": "open"},
-            "b": {"type": "string", "description": "Branch (commits only)", "default": "main"},
-            "n": {"type": "integer", "description": "Results per page", "default": 20}
-        },
-        "required": ["t", "o", "r"]
-    }
-)
-async def github_list(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    t = kw.get("t", "")
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    s = kw.get("s", "open")
-    b = kw.get("b", "main")
-    n = min(kw.get("n", 20), 100)
-    ep_map = {
-        "commits": f"/repos/{o}/{r}/commits?sha={b}&per_page={n}",
-        "issues": f"/repos/{o}/{r}/issues?state={s}&per_page={n}",
-        "pull_requests": f"/repos/{o}/{r}/pulls?state={s}&per_page={n}",
-    }
-    ep = ep_map.get(t)
-    if not ep:
-        return f"Unknown target: {t}"
-    rc, out = _curl(["-H", _auth(), _url(ep)])
-    return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
-
-@register.tool(
-    name="github_create",
-    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, or pull request review.",
-    params={
-        "type": "object",
-        "properties": {
-            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star"], "description": "What type of resource to create"},
-            "o": {"type": "string", "description": "Repository owner"},
-            "r": {"type": "string", "description": "Repository name"},
-            "nm": {"type": "string", "description": "Name (repo name, branch name)"},
-            "pp": {"type": "string", "description": "File path (for file action)"},
-            "ct": {"type": "string", "description": "File content (for file action) or body text"},
-            "msg": {"type": "string", "description": "Commit message (for file action)"},
-            "br": {"type": "string", "description": "Branch name", "default": "main"},
-            "ti": {"type": "string", "description": "Title (for issue/PR)"},
-            "bd": {"type": "string", "description": "Body text (for issue/PR/review)"},
-            "hd": {"type": "string", "description": "Head branch (for PR)"},
-            "ba": {"type": "string", "description": "Base branch (for PR)"},
-            "pn": {"type": "integer", "description": "PR number (for review)"},
-            "desc": {"type": "string", "description": "Repository description"},
-            "pv": {"type": "boolean", "description": "Private repository?", "default": True},
-            "sh": {"type": "string", "description": "SHA of existing file (required when updating)"},
-            "dr": {"type": "boolean", "description": "Draft pull request?", "default": False},
-            "ev": {"type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"], "description": "Review event type"},
-            "lb": {"type": "array", "items": {"type": "string"}, "description": "Labels to apply"},
-            "as": {"type": "array", "items": {"type": "string"}, "description": "Users to assign"},
-            "fb": {"type": "string", "description": "Source branch to fork from (for branch creation)"}
-        },
-        "required": ["act"]
-    }
-)
-async def github_create(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    act = kw.get("act", "")
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    nm = kw.get("nm", "")
-    pp = kw.get("pp", "")
-    ct = kw.get("ct", "")
-    msg = kw.get("msg", "")
-    br = kw.get("br", "main")
-    ti = kw.get("ti", "")
-    bd = kw.get("bd", "")
-    hd = kw.get("hd", "")
-    ba = kw.get("ba", "")
-    pn = kw.get("pn", 0)
-    desc = kw.get("desc", "")
-    pv = kw.get("pv", True)
-    sh = kw.get("sh", "")
-    dr = kw.get("dr", False)
-    ev = kw.get("ev", "")
-    lb = kw.get("lb", None)
-    as_ = kw.get("as", None)
-    fb = kw.get("fb", "")
-
-    if act == "repository":
-        d = {"name": nm, "description": desc, "private": pv}
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url("/user/repos")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "file":
-        encoded = base64.b64encode(ct.encode()).decode()
-        d = {"message": msg or f"Update {pp}", "content": encoded, "branch": br}
-        if sh:
-            d["sha"] = sh
-        rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/contents/{pp}")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "issue":
-        d = {"title": ti}
-        if bd:
-            d["body"] = bd
-        if lb:
-            d["labels"] = lb
-        if as_:
-            d["assignees"] = as_
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "pull_request":
-        d = {"title": ti, "head": hd, "base": ba}
-        if bd:
-            d["body"] = bd
-        if dr:
-            d["draft"] = True
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "branch":
-        src = fb or br
-        rc2, ref_out = _curl(["-H", _auth(), _url(f"/repos/{o}/{r}/git/refs/heads/{src}")])
-        if rc2 != 0:
-            return f"Failed to get source branch ref: {ref_out[:200]}"
+    def _run(self, args: list[str], timeout: int = 30) -> tuple[int, str]:
+        import subprocess
+        cmd = [self._curl, "-s", "-H", "Accept: application/vnd.github+json"]
+        if self._token:
+            cmd += ["-H", f"Authorization: token {self._token}"]
+        cmd += args
         try:
-            sha_val = json.loads(ref_out)["object"]["sha"]
-        except (json.JSONDecodeError, KeyError):
-            return f"Failed to parse ref: {ref_out[:200]}"
-        d = {"ref": f"refs/heads/{nm}", "sha": sha_val}
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/git/refs")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "pull_request_review":
-        d = {"body": bd or "", "event": ev or "COMMENT"}
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls/{pn}/reviews")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "star":
-        rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Length: 0",
-                         _url(f"/user/starred/{o}/{r}")])
-        if rc == 0:
-            return f"⭐ Starred {o}/{r} successfully"
-        return f"Star failed (code {rc}): {out[:200]}"
-    return f"Unknown action: {act}"
+            r = subprocess.run(cmd, capture_output=True, text=False, timeout=timeout)
+            return r.returncode, r.stdout.decode("utf-8", errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            return -1, '{"error": "curl timeout"}'
+        except Exception as e:
+            return -1, json.dumps({"error": str(e)})
 
+    def _url(self, path: str) -> str:
+        return f"https://api.github.com{path}"
 
-@register.tool(
-    name="github_update",
-    description="Update a GitHub issue (title, body, state, labels, assignees, milestone) or update a pull request branch.",
-    params={
-        "type": "object",
-        "properties": {
-            "act": {"type": "string", "enum": ["issue", "pull_request_branch"], "description": "What to update"},
-            "o": {"type": "string", "description": "Repository owner"},
-            "r": {"type": "string", "description": "Repository name"},
-            "in": {"type": "integer", "description": "Issue number"},
-            "pn": {"type": "integer", "description": "PR number"},
-            "ti": {"type": "string", "description": "New title"},
-            "bd": {"type": "string", "description": "New body"},
-            "st": {"type": "string", "enum": ["open", "closed"], "description": "New state"},
-            "lb": {"type": "array", "items": {"type": "string"}, "description": "New labels"},
-            "as": {"type": "array", "items": {"type": "string"}, "description": "New assignees"},
-            "ms": {"type": "integer", "description": "Milestone number"},
-            "sh": {"type": "string", "description": "Expected head SHA (for PR branch update)"}
-        },
-        "required": ["act", "o", "r"]
-    }
-)
-async def github_update(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    act = kw.get("act", "")
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    inn = kw.get("in", 0)
-    pn = kw.get("pn", 0)
-    ti = kw.get("ti", "")
-    bd = kw.get("bd", "")
-    st = kw.get("st", "")
-    lb = kw.get("lb", None)
-    as_ = kw.get("as", None)
-    ms = kw.get("ms", 0)
-    sh = kw.get("sh", "")
+    def get(self, path: str, timeout: int = 30) -> tuple[int, str]:
+        return self._run([self._url(path)], timeout)
 
-    if act == "issue":
-        d = {}
-        if ti:
-            d["title"] = ti
-        if bd:
-            d["body"] = bd
-        if st:
-            d["state"] = st
-        if lb is not None:
-            d["labels"] = lb
-        if as_ is not None:
-            d["assignees"] = as_
-        if ms:
-            d["milestone"] = ms
-        if not d:
-            return "No fields to update"
-        rc, out = _curl(["-X", "PATCH", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues/{inn}")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "pull_request_branch":
-        d = {}
-        if sh:
-            d["expected_head_sha"] = sh
-        rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d) if d else "{}",
-                         _url(f"/repos/{o}/{r}/pulls/{pn}/update-branch")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    return f"Unknown action: {act}"
+    def post(self, path: str, body: dict, timeout: int = 30) -> tuple[int, str]:
+        return self._run(["-X", "POST", self._url(path),
+                         "-d", json.dumps(body)], timeout)
 
+    def patch(self, path: str, body: dict, timeout: int = 30) -> tuple[int, str]:
+        return self._run(["-X", "PATCH", self._url(path),
+                         "-d", json.dumps(body)], timeout)
 
-@register.tool(
-    name="github_mutation",
-    description="Perform batched mutations: create/update multiple files, add issue comment, or merge a pull request.",
-    params={
-        "type": "object",
-        "properties": {
-            "act": {"type": "string", "enum": ["files", "issue_comment", "pull_request"], "description": "Mutation type"},
-            "o": {"type": "string", "description": "Repository owner"},
-            "r": {"type": "string", "description": "Repository name"},
-            "br": {"type": "string", "description": "Branch", "default": "main"},
-            "msg": {"type": "string", "description": "Commit message (for files)"},
-            "fs": {"type": "array", "items": {"type": "object", "properties": {"p": {"type": "string", "description": "File path"}, "c": {"type": "string", "description": "File content"}}}, "description": "Files to create/update in one batch"},
-            "in": {"type": "integer", "description": "Issue number (for comment)"},
-            "bd": {"type": "string", "description": "Comment body or merge message"},
-            "pn": {"type": "integer", "description": "PR number (for merge)"},
-            "mm": {"type": "string", "enum": ["merge", "squash", "rebase"], "description": "Merge method", "default": "merge"},
-            "ct": {"type": "string", "description": "Merge commit title"}
-        },
-        "required": ["act", "o", "r"]
-    }
-)
-async def github_mutation(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    act = kw.get("act", "")
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    br = kw.get("br", "main")
-    msg = kw.get("msg", "")
-    fs = kw.get("fs", None)
-    inn = kw.get("in", 0)
-    bd = kw.get("bd", "")
-    pn = kw.get("pn", 0)
-    mm = kw.get("mm", "merge")
-    ct = kw.get("ct", "")
+    def put(self, path: str, body: dict, timeout: int = 30) -> tuple[int, str]:
+        return self._run(["-X", "PUT", self._url(path),
+                         "-d", json.dumps(body)], timeout)
 
-    if act == "files":
-        if not fs:
-            return "No files specified"
-        results = []
-        for f in fs:
-            fp = f.get("p", "")
-            fc = f.get("c", "")
-            encoded = base64.b64encode(fc.encode()).decode()
-            d = {"message": msg or f"Update {fp}", "content": encoded, "branch": br}
-            rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
-                             "-d", json.dumps(d), _url(f"/repos/{o}/{r}/contents/{fp}")])
-            try:
-                od = json.loads(out)
-                s = od.get("content", {}).get("sha", "?")
-            except Exception:
-                s = out[:100]
-            results.append(f"  {fp}: {s}")
-        return "Files:\n" + "\n".join(results)
-    elif act == "issue_comment":
-        d = {"body": bd}
-        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues/{inn}/comments")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    elif act == "pull_request":
-        d = {"merge_method": mm}
-        if ct:
-            d["commit_title"] = ct
-        if bd:
-            d["commit_message"] = bd
-        rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
-                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls/{pn}/merge")])
-        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-    return f"Unknown action: {act}"
+    def delete(self, path: str, timeout: int = 30) -> tuple[int, str]:
+        return self._run(["-X", "DELETE", self._url(path)], timeout)
 
+    def search(self, q: str, t: str = "repositories", n: int = 10) -> tuple[int, str]:
+        from urllib.parse import quote
+        return self.get(f"/search/{t}?q={quote(q)}&per_page={n}")
 
-@register.tool(
-    name="github_fork",
-    description="Fork a GitHub repository to your personal account or a specified organization.",
-    params={
-        "type": "object",
-        "properties": {
-            "o": {"type": "string", "description": "Source repository owner"},
-            "r": {"type": "string", "description": "Source repository name"},
-            "org": {"type": "string", "description": "Target organization (optional, forks to personal account by default)"}
-        },
-        "required": ["o", "r"]
-    }
-)
-async def github_fork(*args, **kw):
-    err = _check()
-    if err:
-        return err
-    o = kw.get("o", "")
-    r = kw.get("r", "")
-    org = kw.get("org", "")
-    d = {}
-    if org:
-        d["organization"] = org
-    body = json.dumps(d) if d else "{}"
-    rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
-                     "-d", body, _url(f"/repos/{o}/{r}/forks")])
-    return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
+    def list(self, path: str, n: int = 20) -> tuple[int, str]:
+        sep = "&" if "?" in path else "?"
+        return self.get(f"{path}{sep}per_page={n}")
 
-
-async def _monitor_notify(summary: str, msg_type: str, target: str):
-    """监控器通知回调——发送到指定会话"""
-    try:
-        from core.server import app
-        from core.utils.session import SessionUtils
-        sess = SessionUtils.parse(target)
-        if sess:
-            await app.bus.emit("message.send", {
-                "session": sess,
-                "message": f"[GitHub Monitor]\n{summary}"
-            })
-    except Exception as e:
-        logger.error(f"[Monitor] notify failed: {e}")
+    def download(self, url: str) -> tuple[int, str]:
+        """Download a file from GitHub raw content URL (no auth needed for public)."""
+        import subprocess
+        try:
+            r = subprocess.run([self._curl, "-sL", url],
+                              capture_output=True, text=False, timeout=30)
+            return r.returncode, r.stdout.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            return -1, "download timeout"
+        except Exception as e:
+            return -1, str(e)
 
 
 class GitHubToolPlugin(BasePlugin):
-    """GitHub Tool Plugin — curl直接调用GitHub API + 自动监控"""
+    def __init__(self, ctx, cfg):
+        super().__init__(ctx, cfg)
+        self.logger = logger
+        self.cfg = cfg
+        token = cfg.get("github_token", "")
+        if not token:
+            self.client = None
+            self.monitor = None
+            return
+        self.client = GitHubClient(token)
+        self.monitor = None
+        if cfg.get("watch_enabled", False):
+            from .monitor import GitHubMonitor
+            self.monitor = GitHubMonitor(self, token, self._notify_cb)
 
     async def initialize(self):
-        global _github_token, _monitor
-        _github_token = self.plugin_cfg.get("github_token", "")
-
-        if _github_token:
-            logger.info(f"GitHub Tool ready (token: {_github_token[:6]}...{_github_token[-4:]})")
-        else:
-            logger.warning("GitHub Tool loaded but no token configured")
-
-        # 启动后台监控
-        _monitor = GitHubMonitor(self, _github_token, notify_cb=_monitor_notify)
-        await _monitor.start()
+        if self.monitor:
+            await self.monitor.start()
 
     async def terminate(self):
-        global _monitor
-        if _monitor:
-            await _monitor.stop()
-            _monitor = None
-        logger.info("GitHub Tool terminated")
+        if self.monitor:
+            await self.monitor.stop()
+        self.logger.info("github-tool terminated")
+
+    async def _notify_cb(self, summary: str, msg_type: str, target: str):
+        """跨会话发送通知"""
+        if not target or not summary:
+            return
+        try:
+            parts = target.split(":")
+            if len(parts) < 3:
+                self.logger.warning(f"Invalid notify target: {target}")
+                return
+            adapter = parts[0]
+            stype = parts[1]
+            sid = ":".join(parts[2:])
+            if adapter == "qq" and stype in ("dm", "gm"):
+                from core.tools import session_send
+                await session_send(
+                    target=f"{adapter}:{stype}:{sid}",
+                    description=f"GitHub通知: {msg_type}",
+                    msg=summary,
+                )
+        except Exception as e:
+            self.logger.error(f"Notify failed: {e}")
+
+    # ========== Search ==========
+
+    async def github_search(
+        self, event, q: str, t: str = "repositories", n: int = 10
+    ) -> str:
+        """Search GitHub (repositories, code, issues, users)."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        rc, out = self.client.search(q, t, n)
+        if rc:
+            return f"❌ Search failed: {out[:200]}"
+        try:
+            data = json.loads(out)
+            items = data.get("items", [])
+            if not items:
+                return "无结果"
+        except json.JSONDecodeError:
+            return f"❌ 解析失败: {out[:200]}"
+        lines = []
+        for item in items[:n]:
+            if t == "repositories":
+                name = item.get("full_name", "")
+                desc = item.get("description", "") or ""
+                stars = item.get("stargazers_count", 0)
+                lang = item.get("language") or ""
+                lines.append(f"📦 {name} ⭐{stars} {lang}\n  {desc[:100]}")
+            elif t == "issues":
+                title = item.get("title", "")
+                repo_url = item.get("repository_url", "")
+                state = item.get("state", "")
+                num = item.get("number", "")
+                labels = ", ".join(l["name"] for l in item.get("labels", [])[:3])
+                lines.append(f"#{num} {title} [{state}] {labels}\n  {repo_url}")
+            elif t == "users":
+                login = item.get("login", "")
+                uid = item.get("id", "")
+                url = item.get("html_url", "")
+                lines.append(f"👤 {login} (uid:{uid})\n  {url}")
+            elif t == "code":
+                name = item.get("name", "")
+                path = item.get("path", "")
+                repo = item.get("repository", {}).get("full_name", "")
+                lines.append(f"📄 {repo}/{path}")
+        if not lines:
+            return "无结果"
+        lines.append(f"\n共 {len(items)} 条结果，显示前 {min(n, len(items))} 条")
+        return "\n\n".join(lines)
+
+    # ========== Get ==========
+
+    async def github_get(
+        self, event,
+        t: str = "contents",
+        o: str = "",
+        r: str = "",
+        p: str = "",
+        i: int = 0,
+        n: int = 0,
+        b: str = "main",
+    ) -> str:
+        """Get content from GitHub."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        if t == "contents":
+            if not p:
+                # list repo root
+                rc, out = self.client.list(f"/repos/{o}/{r}/contents/{p}", n)
+            else:
+                rc, out = self.client.get(f"/repos/{o}/{r}/contents/{p}?ref={b}")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            try:
+                data = json.loads(out)
+            except json.JSONDecodeError:
+                return f"❌ 解析失败: {out[:200]}"
+            if isinstance(data, list):
+                lines = [f"📂 {o}/{r}/{p or ''}"]
+                for item in data:
+                    tp = "📁" if item["type"] == "dir" else "📄"
+                    lines.append(f"  {tp} {item['name']}")
+                return "\n".join(lines)
+            else:
+                content_b64 = data.get("content", "")
+                import base64
+                try:
+                    content = base64.b64decode(content_b64).decode("utf-8")
+                except Exception:
+                    content = content_b64[:200]
+                return content[:2000]
+        elif t == "issue":
+            rc, out = self.client.get(f"/repos/{o}/{r}/issues/{i}")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_issue(out)
+        elif t == "pull_request":
+            rc, out = self.client.get(f"/repos/{o}/{r}/pulls/{n}")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_pr(out)
+        elif t == "pull_request_files":
+            rc, out = self.client.get(f"/repos/{o}/{r}/pulls/{n}/files")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            try:
+                files = json.loads(out)
+            except json.JSONDecodeError:
+                return f"❌ 解析失败: {out[:200]}"
+            lines = []
+            for f in files[:20]:
+                fn = f.get("filename", "")
+                status = f.get("status", "")
+                add = f.get("additions", 0)
+                del_ = f.get("deletions", 0)
+                lines.append(f"  {status}: {fn} (+{add}/-{del_})")
+            return f"📂 {o}/{r} PR #{n} files ({len(files)} total)\n" + "\n".join(lines)
+        elif t == "pull_request_status":
+            rc, out = self.client.get(f"/repos/{o}/{r}/commits/{n}/status")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_status(out)
+        elif t == "pull_request_comments":
+            rc, out = self.client.get(f"/repos/{o}/{r}/pulls/{n}/comments")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_comments(out, "review")
+        elif t == "pull_request_reviews":
+            rc, out = self.client.get(f"/repos/{o}/{r}/pulls/{n}/reviews")
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_reviews(out)
+
+    # ========== List ==========
+
+    async def github_list(
+        self, event,
+        t: str = "commits",
+        o: str = "",
+        r: str = "",
+        s: str = "open",
+        b: str = "main",
+        n: int = 20,
+    ) -> str:
+        """List commits, issues or pull requests."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        if t == "commits":
+            rc, out = self.client.list(f"/repos/{o}/{r}/commits?sha={b}", n)
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            try:
+                commits = json.loads(out)
+            except json.JSONDecodeError:
+                return f"❌ 解析失败: {out[:200]}"
+            lines = [f"📜 {o}/{r} ({b}) - recent commits"]
+            for c in commits[:n]:
+                sha = c.get("sha", "")[:7]
+                msg = (c.get("commit", {}).get("message", "") or "").split("\n")[0]
+                author = c.get("commit", {}).get("author", {}).get("name", "")
+                lines.append(f"  {sha} {msg[:60]} — {author}")
+            return "\n".join(lines)
+        elif t == "issues":
+            rc, out = self.client.list(f"/repos/{o}/{r}/issues?state={s}", n)
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_issues_list(out, o, r, s)
+        elif t == "pull_requests":
+            rc, out = self.client.list(f"/repos/{o}/{r}/pulls?state={s}", n)
+            if rc:
+                return f"❌ Failed: {out[:200]}"
+            return self._format_prs_list(out, o, r, s)
+
+    # ========== Create ==========
+
+    async def github_create(
+        self, event,
+        act: str = "issue",
+        o: str = "",
+        r: str = "",
+        nm: str = "",
+        pp: str = "",
+        ct: str = "",
+        msg: str = "",
+        br: str = "main",
+        ti: str = "",
+        bd: str = "",
+        hd: str = "",
+        ba: str = "",
+        pn: int = 0,
+        desc: str = "",
+        pv: bool = True,
+        sh: str = "",
+        dr: bool = False,
+        ev: str = "COMMENT",
+        lb: list = None,
+        as_: list = None,
+        fb: str = "",
+    ) -> str:
+        """Create GitHub resources."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        if act == "repository":
+            data = {"name": nm, "private": pv, "description": desc}
+            rc, out = self.client.post("/user/repos", data)
+            if rc:
+                return f"❌ 创建仓库失败: {out[:200]}"
+            return f"✅ 仓库 {nm} 创建成功"
+        elif act == "file":
+            import base64
+            content_b64 = base64.b64encode(ct.encode()).decode()
+            data = {"message": msg, "content": content_b64, "branch": br}
+            if sh:
+                data["sha"] = sh
+            rc, out = self.client.put(f"/repos/{o}/{r}/contents/{pp}", data)
+            if rc:
+                return f"❌ 文件操作失败: {out[:200]}"
+            return f"✅ {pp} 已{'更新' if sh else '创建'}"
+        elif act == "issue":
+            data = {"title": ti, "body": bd}
+            if lb:
+                data["labels"] = lb
+            if as_:
+                data["assignees"] = as_
+            rc, out = self.client.post(f"/repos/{o}/{r}/issues", data)
+            if rc:
+                return f"❌ 创建Issue失败: {out[:200]}"
+            return f"✅ Issue #{json.loads(out).get('number', '?')} 已创建"
+        elif act == "pull_request":
+            data = {"title": ti, "head": hd, "base": ba, "body": bd, "draft": dr}
+            rc, out = self.client.post(f"/repos/{o}/{r}/pulls", data)
+            if rc:
+                return f"❌ 创建PR失败: {out[:200]}"
+            return f"✅ PR #{json.loads(out).get('number', '?')} 已创建"
+        elif act == "branch":
+            # Get SHA of source branch
+            fb_ref = f"heads/{fb}" if fb else f"heads/{br}"
+            rc, out = self.client.get(f"/repos/{o}/{r}/git/ref/{fb_ref}")
+            if rc:
+                return f"❌ 获取源分支失败: {out[:200]}"
+            sha = json.loads(out).get("object", {}).get("sha", "")
+            if not sha:
+                return "❌ 无法获取源分支SHA"
+            data = {"ref": f"refs/heads/{nm}", "sha": sha}
+            rc, out = self.client.post(f"/repos/{o}/{r}/git/refs", data)
+            if rc:
+                return f"❌ 创建分支失败: {out[:200]}"
+            return f"✅ 分支 {nm} 已创建（基于 {fb or br}）"
+        elif act == "pull_request_review":
+            data = {"body": bd, "event": ev}
+            rc, out = self.client.post(
+                f"/repos/{o}/{r}/pulls/{pn}/reviews", data)
+            if rc:
+                return f"❌ 提交Review失败: {out[:200]}"
+            return f"✅ Review 已提交 ({ev})"
+        elif act == "star":
+            rc, out = self.client.put(f"/user/starred/{o}/{r}", {})
+            if rc:
+                return f"❌ Star失败: {out[:200]}"
+            return f"⭐ 已为 {o}/{r} 点亮Star"
+
+    # ========== Update ==========
+
+    async def github_update(
+        self, event,
+        act: str = "issue",
+        o: str = "",
+        r: str = "",
+        in_: int = 0,
+        pn: int = 0,
+        ti: str = "",
+        bd: str = "",
+        st: str = "open",
+        lb: list = None,
+        as_: list = None,
+        ms: int = 0,
+        sh: str = "",
+    ) -> str:
+        """Update an issue or PR branch."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        if act == "issue":
+            data = {}
+            if ti:
+                data["title"] = ti
+            if bd:
+                data["body"] = bd
+            if st:
+                data["state"] = st
+            if lb:
+                data["labels"] = lb
+            if as_:
+                data["assignees"] = as_
+            if ms:
+                data["milestone"] = ms
+            rc, out = self.client.patch(f"/repos/{o}/{r}/issues/{in_}", data)
+            if rc:
+                return f"❌ 更新Issue失败: {out[:200]}"
+            return f"✅ Issue #{in_} 已更新"
+        elif act == "pull_request_branch":
+            data = {}
+            if sh:
+                data["expected_head_sha"] = sh
+            rc, out = self.client.put(
+                f"/repos/{o}/{r}/pulls/{pn}/update-branch", data)
+            if rc:
+                return f"❌ 更新PR分支失败: {out[:200]}"
+            return f"✅ PR #{pn} 分支已更新"
+
+    # ========== Mutation ==========
+
+    async def github_mutation(
+        self, event,
+        act: str = "files",
+        o: str = "",
+        r: str = "",
+        br: str = "main",
+        msg: str = "",
+        fs: list = None,
+        in_: int = 0,
+        bd: str = "",
+        pn: int = 0,
+        mm: str = "merge",
+        ct: str = "",
+    ) -> str:
+        """Batch mutations: create/update files, comment, merge PR."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        if act == "files":
+            if not fs:
+                return "❌ 未指定文件"
+            import base64
+            results = []
+            for f in fs:
+                fp = f.get("p", "")
+                fc = f.get("c", "")
+                content_b64 = base64.b64encode(fc.encode()).decode()
+                # Try to get existing file SHA
+                rc_exist, out_exist = self.client.get(
+                    f"/repos/{o}/{r}/contents/{fp}?ref={br}")
+                sha = ""
+                if rc_exist == 0:
+                    try:
+                        sha = json.loads(out_exist).get("sha", "")
+                    except json.JSONDecodeError:
+                        pass
+                data = {
+                    "message": msg or f"Update {fp}",
+                    "content": content_b64,
+                    "branch": br,
+                }
+                if sha:
+                    data["sha"] = sha
+                rc, out = self.client.put(
+                    f"/repos/{o}/{r}/contents/{fp}", data)
+                if rc:
+                    results.append(f"❌ {fp}: 失败")
+                else:
+                    results.append(f"✅ {fp}: {'更新' if sha else '创建'}")
+            return "\n".join(results)
+        elif act == "issue_comment":
+            data = {"body": bd}
+            rc, out = self.client.post(
+                f"/repos/{o}/{r}/issues/{in_}/comments", data)
+            if rc:
+                return f"❌ 评论失败: {out[:200]}"
+            return "✅ 评论已添加"
+        elif act == "pull_request":
+            data = {"merge_method": mm, "commit_title": ct or bd[:72]}
+            rc, out = self.client.put(
+                f"/repos/{o}/{r}/pulls/{pn}/merge", data)
+            if rc:
+                return f"❌ 合并失败: {out[:200]}"
+            return f"✅ PR #{pn} 已合并 ({mm})"
+
+    # ========== Fork ==========
+
+    async def github_fork(
+        self, event,
+        o: str = "",
+        r: str = "",
+        org: str = "",
+    ) -> str:
+        """Fork a repository."""
+        if not self.client:
+            return "❌ GitHub Token 未配置"
+        path = f"/repos/{o}/{r}/forks"
+        data = {}
+        if org:
+            data["organization"] = org
+        rc, out = self.client.post(path, data)
+        if rc:
+            return f"❌ Fork失败: {out[:200]}"
+        return f"✅ {o}/{r} 已Fork{' 到 ' + org if org else ''}"
+
+    # ========== Formatters ==========
+
+    def _format_issue(self, raw: str) -> str:
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:500]
+        title = d.get("title", "")
+        state = d.get("state", "")
+        num = d.get("number", "")
+        body = (d.get("body") or "")[:300]
+        user = d.get("user", {}).get("login", "")
+        labels = ", ".join(l["name"] for l in d.get("labels", [])[:5])
+        comments = d.get("comments", 0)
+        url = d.get("html_url", "")
+        return f"#{num} {title} [{state}] by {user}\n🏷️ {labels or '无标签'} 💬 {comments}条评论\n{body}\n🔗 {url}"
+
+    def _format_pr(self, raw: str) -> str:
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:500]
+        title = d.get("title", "")
+        state = d.get("state", "")
+        num = d.get("number", "")
+        body = (d.get("body") or "")[:300]
+        user = d.get("user", {}).get("login", "")
+        base = d.get("base", {}).get("ref", "")
+        head = d.get("head", {}).get("ref", "")
+        url = d.get("html_url", "")
+        mergeable = d.get("mergeable")
+        status = "可合并" if mergeable else "不可合并" if mergeable is False else "待检测"
+        return f"PR #{num} {title} [{state}] by {user}\n{head} → {base} 状态: {status}\n{body}\n🔗 {url}"
+
+    def _format_status(self, raw: str) -> str:
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:500]
+        state = d.get("state", "")
+        statuses = d.get("statuses", [])
+        lines = [f"合并状态: {state}"]
+        for s in statuses[:10]:
+            context = s.get("context", "")
+            state_s = s.get("state", "")
+            desc = s.get("description", "")
+            lines.append(f"  {('✅' if state_s == 'success' else '❌')} {context}: {desc}")
+        return "\n".join(lines)
+
+    def _format_comments(self, raw: str, tp: str) -> str:
+        try:
+            comments = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:300]
+        lines = [f"💬 {len(comments)} 条{tp}评论"]
+        for c in comments[:20]:
+            user = c.get("user", {}).get("login", "?")
+            body = (c.get("body") or "")[:200]
+            path = c.get("path", "")
+            lines.append(f"  💬 {user}: {body}")
+            if path:
+                lines.append(f"    📄 {path}")
+        return "\n".join(lines)
+
+    def _format_reviews(self, raw: str) -> str:
+        try:
+            reviews = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:300]
+        lines = [f"📋 {len(reviews)} 条Review"]
+        for rv in reviews[:10]:
+            user = rv.get("user", {}).get("login", "?")
+            state = rv.get("state", "")
+            body = (rv.get("body") or "")[:200]
+            lines.append(f"  {user}: [{state}] {body}")
+        return "\n".join(lines)
+
+    def _format_issues_list(self, raw: str, o: str, r: str, state: str) -> str:
+        try:
+            issues = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:300]
+        # Filter out PRs (GitHub returns PRs in /issues)
+        real_issues = [i for i in issues if "pull_request" not in i]
+        lines = [f"📋 {o}/{r} ({state}) - {len(real_issues)} issues"]
+        for i in real_issues[:20]:
+            num = i.get("number", "")
+            title = i.get("title", "")
+            labels = ", ".join(l["name"] for l in i.get("labels", [])[:3])
+            lines.append(f"  #{num} {title[:50]} [{labels}]")
+        return "\n".join(lines)
+
+    def _format_prs_list(self, raw: str, o: str, r: str, state: str) -> str:
+        try:
+            prs = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:300]
+        lines = [f"📋 {o}/{r} ({state}) - {len(prs)} PRs"]
+        for pr in prs[:20]:
+            num = pr.get("number", "")
+            title = pr.get("title", "")
+            user = pr.get("user", {}).get("login", "?")
+            lines.append(f"  #{num} {title[:50]} — {user}")
+        return "\n".join(lines)
