@@ -53,10 +53,18 @@ class GitHubMonitor:
     def enabled(self) -> bool:
         return self.c("enabled", False) and bool(self._token)
 
+    def _targets(self) -> list[str]:
+        """获取通知目标列表（兼容list和string）"""
+        raw = self.c("notify_target", [])
+        if isinstance(raw, list):
+            return [t.strip() for t in raw if t and t.strip()]
+        if isinstance(raw, str) and raw.strip():
+            return [raw.strip()]
+        return []
+
     async def start(self):
         if not self.enabled:
             return
-        # 先获取当前用户名
         rc, out = _curl(["-H", _auth(self._token), _url("/user")])
         if rc == 0:
             try:
@@ -97,12 +105,10 @@ class GitHubMonitor:
         search_mode = self.c("search_mode", False)
 
         if search_mode:
-            # 全量搜索模式 — 搜所有我提的PR和分配给/提到我的Issue
             await self._search_my_prs()
             if self.c("watch_issues", True):
                 await self._search_my_issues()
         else:
-            # 仓库扫描模式 — 按配置的仓库列表扫描
             repos = list(self.c("repos", []))
             if self.c("own_repos", True):
                 rc, out = _curl(["-H", _auth(self._token),
@@ -128,7 +134,6 @@ class GitHubMonitor:
     # ========== Search Mode ==========
 
     async def _search_my_prs(self):
-        """通过 Search API 搜所有我提的 open PR"""
         q = f"author:{self._me} type:pr state:open"
         rc, out = _curl(["-H", _auth(self._token),
                          _url(f"/search/issues?q={quote(q)}&per_page=50&sort=updated")])
@@ -140,12 +145,11 @@ class GitHubMonitor:
         except json.JSONDecodeError:
             return
 
-        notify_target = self.c("notify_target", "")
+        targets = self._targets()
         auto_fix = self.c("auto_fix", False)
         require_confirm = self.c("require_confirm", True)
 
         for pr in items:
-            # 解析仓库信息
             repo_url = pr.get("repository_url", "")
             parts = repo_url.strip("/").split("/")
             if len(parts) < 2:
@@ -155,7 +159,6 @@ class GitHubMonitor:
             pr_title = pr["title"]
             pr_url = pr.get("html_url", "")
 
-            # 获取 review comments
             rc2, out2 = _curl(["-H", _auth(self._token),
                               _url(f"/repos/{owner}/{name}/pulls/{pr_num}/comments")])
             if rc2 != 0:
@@ -188,14 +191,14 @@ class GitHubMonitor:
             lines.append(f"  🔗 {pr_url}")
             summary = "\n".join(lines)
 
-            if notify_target and self._notify:
-                await self._notify(summary, "review", notify_target)
+            for t in targets:
+                if self._notify:
+                    await self._notify(summary, "review", t)
 
             if auto_fix and not require_confirm:
                 await self._auto_fix_pr(owner, name, pr_num, new_comments)
 
     async def _search_my_issues(self):
-        """通过 Search API 搜分配给或提到我的 Issue"""
         q = f"assignee:{self._me} state:open type:issue"
         rc, out = _curl(["-H", _auth(self._token),
                          _url(f"/search/issues?q={quote(q)}&per_page=50&sort=updated")])
@@ -207,7 +210,7 @@ class GitHubMonitor:
         except json.JSONDecodeError:
             return
 
-        notify_target = self.c("notify_target", "")
+        targets = self._targets()
 
         for issue in items:
             repo_url = issue.get("repository_url", "")
@@ -248,13 +251,14 @@ class GitHubMonitor:
             lines.append(f"  🔗 {issue_url}")
             summary = "\n".join(lines)
 
-            if notify_target and self._notify:
-                await self._notify(summary, "issue", notify_target)
+            for t in targets:
+                if self._notify:
+                    await self._notify(summary, "issue", t)
 
     # ========== Repo Scan Mode ==========
 
     async def _scan_repo_prs(self, owner: str, name: str):
-        notify_target = self.c("notify_target", "")
+        targets = self._targets()
         auto_fix = self.c("auto_fix", False)
         require_confirm = self.c("require_confirm", True)
 
@@ -308,14 +312,15 @@ class GitHubMonitor:
             lines.append(f"  🔗 {pr_url}")
             summary = "\n".join(lines)
 
-            if notify_target and self._notify:
-                await self._notify(summary, "review", notify_target)
+            for t in targets:
+                if self._notify:
+                    await self._notify(summary, "review", t)
 
             if auto_fix and not require_confirm:
                 await self._auto_fix_pr(owner, name, pr_num, new_comments)
 
     async def _scan_repo_issues(self, owner: str, name: str):
-        notify_target = self.c("notify_target", "")
+        targets = self._targets()
 
         rc, out = _curl(["-H", _auth(self._token),
                          _url(f"/repos/{owner}/{name}/issues?state=open&per_page=20&assignee={self._me}")])
@@ -364,15 +369,14 @@ class GitHubMonitor:
             lines.append(f"  🔗 {issue_url}")
             summary = "\n".join(lines)
 
-            if notify_target and self._notify:
-                await self._notify(summary, "issue", notify_target)
+            for t in targets:
+                if self._notify:
+                    await self._notify(summary, "issue", t)
 
     # ========== Auto Fix ==========
 
     async def _auto_fix_pr(self, owner: str, name: str, pr_num: int,
                            comments: list[dict]):
-        """自动根据review意见修改代码（预留实现）"""
         logger = self.plugin.logger
         logger.info(f"[Monitor] Auto-fix triggered for {owner}/{name}#{pr_num}")
         # TODO: 调用LLM分析review意见并生成修改
-        # 后续版本实现：提取意见→分析代码→修改→推送新commit
