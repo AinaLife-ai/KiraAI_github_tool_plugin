@@ -34,9 +34,9 @@
             { "label": "固定时间间隔", "value": "interval" },
             { "label": "固定时间点", "value": "fixed_time" }
         ],
-        "hint": "interval=每隔N分钟检查一次；fixed_time=按cron表达式触发",
+        "hint": "选择定时方式，选间隔模式后填分钟数，选时间点模式后填cron表达式",
         "locales": {
-            "zh": { "name": "定时模式", "hint": "interval=每隔N分钟检查一次；fixed_time=按cron表达式触发" }
+            "zh": { "name": "定时模式", "hint": "选择定时方式，选间隔模式后填分钟数，选时间点模式后填cron表达式" }
         }
     },
     "watch_interval_minutes": {
@@ -45,15 +45,27 @@
         "default": 60,
         "min": 5,
         "max": 1440,
-        "hint": "interval模式下每隔多少分钟检查一次",
+        "show_if": { "field": "watch_interval_type", "eq": "interval" },
+        "hint": "每隔多少分钟检查一次",
         "locales": {
-            "zh": { "name": "检查间隔(分钟)", "hint": "interval模式下每隔多少分钟检查一次" }
+            "zh": { "name": "检查间隔(分钟)", "hint": "每隔多少分钟检查一次" }
+        }
+    },
+    "watch_fixed_cron": {
+        "name": "固定时间(cron)",
+        "type": "string",
+        "default": "0 9 * * *",
+        "show_if": { "field": "watch_interval_type", "eq": "fixed_time" },
+        "hint": "cron表达式，例如 0 9 * * * 表示每天早上9点",
+        "locales": {
+            "zh": { "name": "固定时间(cron)", "hint": "cron表达式，例如 0 9 * * * 表示每天早上9点" }
         }
     },
     "watch_own_repos": {
         "name": "监控所有自有仓库",
         "type": "switch",
         "default": true,
+        "show_if": { "field": "watch_search_mode", "eq": false },
         "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）",
         "locales": {
             "zh": { "name": "监控所有自有仓库", "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）" }
@@ -63,6 +75,7 @@
         "name": "额外监控仓库",
         "type": "list",
         "default": [],
+        "show_if": { "field": "watch_search_mode", "eq": false },
         "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）",
         "locales": {
             "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）" }
@@ -90,6 +103,7 @@
         "name": "需要确认",
         "type": "switch",
         "default": true,
+        "show_if": { "field": "watch_auto_fix", "eq": true },
         "hint": "为true时只发通知不给执行，为false且auto_fix开启时自动修改",
         "locales": {
             "zh": { "name": "需要确认", "hint": "为true时只发通知不给执行，为false且auto_fix开启时自动修改" }
