@@ -1,6 +1,7 @@
 # GitHub Tool — KiraAI 插件
 
-curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
+curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。  
+内置 **Auto-Watch 后台监控**，定时检查 PR/Issue 动态。
 
 ## 功能
 
@@ -14,11 +15,39 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 | `github_mutation` | 批量文件操作、发 Issue 评论、合并 PR |
 | `github_fork` | Fork 仓库到个人或组织 |
 
+## Auto-Watch 后台监控（v2.0）
+
+自动检查你提交的 PR 是否收到 review 意见、assign 给你的 Issue 是否有新回复。
+
+### 工作流程
+
+1. 按设定的间隔扫描所有自有仓库 + 额外指定的仓库
+2. 检查 open PR 中作者为自己的那些，获取新的 review comments
+3. 检查 assign 给自己的 Issue 的新回复
+4. 发现有新动态：
+   - **require_confirm=true（默认）** → 发送摘要到指定会话，等主人确认
+   - **auto_fix=true + require_confirm=false** → 自动分析意见并修改代码推送新 commit
+
+### 配置项一览（WebUI 插件设置页）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `watch_enabled` | bool | false | 总开关 |
+| `watch_interval_type` | select | interval | interval=间隔模式 / fixed_time=定时模式 |
+| `watch_interval_minutes` | int | 60 | 检查间隔（分钟），最小5分钟 |
+| `watch_own_repos` | bool | true | 自动监控 token 用户的所有自有仓库 |
+| `watch_repos` | string | "" | 额外监控仓库，逗号分隔（owner/repo） |
+| `watch_issues` | bool | true | 同时监控 Issue 回复 |
+| `watch_auto_fix` | bool | false | 收到 review 后自动修改代码 |
+| `watch_require_confirm` | bool | true | 自动操作前是否需要确认 |
+| `watch_notify_target` | string | "" | 通知目标会话（qq:dm:QQ号 / qq:gm:群号） |
+
 ## 安装
 
 1. 将 `github-tool` 文件夹放入 KiraAI 的 `data/plugins/` 目录
 2. 在 WebUI 插件设置中填写 `GitHub Token`（需 `repo` 权限）
-3. 重启 KiraAI，自动加载
+3. 如需启用后台监控，在配置页打开 `watch_enabled` 并设置通知目标
+4. 重启 KiraAI，自动加载
 
 ## Token 配置
 
@@ -32,6 +61,7 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 - 仅依赖 Python 标准库 + 系统自带 `curl`
 - 自动识别运行平台：Windows 使用 `curl.exe`，Linux/macOS 使用 `curl`
 - 输出精简为 token 友好的格式，避免 LLM 上下文被刷爆
+- 后台监控基于 asyncio 协程，不阻塞主线程
 
 ## 注意事项
 
@@ -39,11 +69,11 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 - 搜索 query 中的空格/特殊字符自动 URL 编码
 - 跨平台兼容：Windows / Linux / macOS 均可运行
 - stdout 使用 UTF-8 解码，避免 GBK 乱码
+- Auto-Watch 需要 token 有 `repo` 权限才能访问私有仓库
 
 ## 许可证
 
 AGPL-3.0
 
 ---
-
 ⭐ 觉得好用？不妨试试用本插件的点赞功能给本项目点个星 —— 自己给自己点一颗星，GitHub 史上最卷的 Star 获取方式。
