@@ -7,7 +7,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Callable
 from urllib.parse import quote
 
@@ -32,6 +32,23 @@ def _url(path: str) -> str:
 
 def _auth(token: str) -> str:
     return f"Authorization: token {token}"
+
+
+def _parse_cron_minutes(cron: str) -> Optional[int]:
+    """简易cron解析：只处理 '分钟 小时 * * *' 格式，返回下次检查间隔秒数"""
+    try:
+        parts = cron.strip().split()
+        if len(parts) < 2:
+            return None
+        cron_min = int(parts[0])
+        cron_hour = int(parts[1])
+        now = datetime.now()
+        target = now.replace(hour=cron_hour, minute=cron_min, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return (target - now).total_seconds()
+    except (ValueError, IndexError):
+        return None
 
 
 class GitHubMonitor:
@@ -96,10 +113,17 @@ class GitHubMonitor:
                 logger.error(f"[Monitor] Check failed: {e}")
 
             interval_type = self.c("interval_type", "interval")
+
             if interval_type == "fixed_time":
-                break
-            minutes = self.c("interval_minutes", 60)
-            await asyncio.sleep(minutes * 60)
+                cron = self.c("fixed_cron", "0 9 * * *")
+                delay = _parse_cron_minutes(cron)
+                if delay:
+                    await asyncio.sleep(delay)
+                else:
+                    await asyncio.sleep(3600)
+            else:
+                minutes = self.c("interval_minutes", 60)
+                await asyncio.sleep(minutes * 60)
 
     async def _check_all(self):
         search_mode = self.c("search_mode", False)
