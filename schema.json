@@ -1,9 +1,9 @@
 {
     "github_token": {
         "name": "GitHub Token",
-        "type": "string",
+        "type": "sensitive",
         "default": "",
-        "hint": "GitHub Personal Access Token (需有repo权限)",
+        "hint": "GitHub Personal Access Token（需要有 repo 权限）",
         "locales": {
             "zh": { "name": "GitHub Token", "hint": "GitHub Personal Access Token（需要有 repo 权限）" }
         }
@@ -28,15 +28,12 @@
     },
     "watch_interval_type": {
         "name": "定时模式",
-        "type": "select",
+        "type": "enum",
         "default": "interval",
-        "options": [
-            { "label": "固定时间间隔", "value": "interval" },
-            { "label": "固定时间点", "value": "fixed_time" }
-        ],
-        "hint": "选择定时方式，选间隔模式后填分钟数，选时间点模式后填cron表达式",
+        "options": ["interval", "fixed_time"],
+        "hint": "interval=固定时间间隔，fixed_time=固定时间点",
         "locales": {
-            "zh": { "name": "定时模式", "hint": "选择定时方式，选间隔模式后填分钟数，选时间点模式后填cron表达式" }
+            "zh": { "name": "定时模式", "hint": "interval=固定时间间隔，fixed_time=固定时间点" }
         }
     },
     "watch_interval_minutes": {
@@ -45,7 +42,6 @@
         "default": 60,
         "min": 5,
         "max": 1440,
-        "show_if": { "field": "watch_interval_type", "eq": "interval" },
         "hint": "每隔多少分钟检查一次",
         "locales": {
             "zh": { "name": "检查间隔(分钟)", "hint": "每隔多少分钟检查一次" }
@@ -55,7 +51,6 @@
         "name": "固定时间(cron)",
         "type": "string",
         "default": "0 9 * * *",
-        "show_if": { "field": "watch_interval_type", "eq": "fixed_time" },
         "hint": "cron表达式，例如 0 9 * * * 表示每天早上9点",
         "locales": {
             "zh": { "name": "固定时间(cron)", "hint": "cron表达式，例如 0 9 * * * 表示每天早上9点" }
@@ -65,7 +60,6 @@
         "name": "监控所有自有仓库",
         "type": "switch",
         "default": true,
-        "show_if": { "field": "watch_search_mode", "eq": false },
         "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）",
         "locales": {
             "zh": { "name": "监控所有自有仓库", "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）" }
@@ -75,7 +69,6 @@
         "name": "额外监控仓库",
         "type": "list",
         "default": [],
-        "show_if": { "field": "watch_search_mode", "eq": false },
         "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）",
         "locales": {
             "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）" }
@@ -103,7 +96,6 @@
         "name": "需要确认",
         "type": "switch",
         "default": true,
-        "show_if": { "field": "watch_auto_fix", "eq": true },
         "hint": "为true时只发通知不给执行，为false且auto_fix开启时自动修改",
         "locales": {
             "zh": { "name": "需要确认", "hint": "为true时只发通知不给执行，为false且auto_fix开启时自动修改" }
