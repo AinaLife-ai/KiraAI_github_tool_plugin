@@ -1,19 +1,21 @@
 {
-  "display_name": "GitHub Tool",
-  "plugin_id": "github-tool",
-  "version": "1.0.0",
-  "author": "爱奈丽",
-  "description": "curl直调GitHub REST API，覆盖search/get/list/create/update/mutation/fork全部操作，token在webui里配置，不需要MCP桥接层",
-  "repo": "https://github.com/AinaLife-ai/KiraAI_github_tool_plugin",
-  "tags": [
-    "github",
-    "git",
-    "api"
-  ],
-  "locales": {
-    "zh": {
-      "display_name": "GitHub 工具",
-      "description": "curl直调GitHub REST API，覆盖search/get/list/create/update/mutation/fork全部操作，token在webui里配置，不需要MCP桥接层"
+    "display_name": "GitHub Tool",
+    "plugin_id": "github-tool",
+    "version": "2.0.0",
+    "author": "爱奈丽",
+    "description": "curl直调GitHub REST API + Auto-Watch后台监控。覆盖search/get/list/create/update/mutation/fork全部操作，支持定时检查PR/Issue回复，自动通知或自动修复代码",
+    "repo": "https://github.com/AinaLife-ai/KiraAI_github_tool_plugin",
+    "tags": [
+        "github",
+        "git",
+        "api",
+        "monitor",
+        "auto-watch"
+    ],
+    "locales": {
+        "zh": {
+            "display_name": "GitHub 工具",
+            "description": "curl直调GitHub REST API + Auto-Watch后台监控。覆盖search/get/list/create/update/mutation/fork全部操作，支持定时检查PR/Issue回复，自动通知或自动修复代码"
+        }
     }
-  }
 }
