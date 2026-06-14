@@ -10,12 +10,17 @@ from core.plugin import BasePlugin
 from core.plugin.plugin_registry import register
 from core.logging_manager import get_logger
 
+from .monitor import GitHubMonitor
+
 logger = get_logger("github-tool", "green")
 
 _github_token: str = ""
 
 # Windows用curl.exe，其他平台（Linux/macOS）用curl
 _CURL_CMD = "curl.exe" if sys.platform == "win32" else "curl"
+
+# 后台监控器实例
+_monitor: Optional[GitHubMonitor] = None
 
 
 def _curl(args: list[str], timeout: int = 30) -> tuple[int, str]:
@@ -51,7 +56,6 @@ def _fmt(raw: str) -> str:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return raw[:500]
-
     if isinstance(data, dict):
         if "message" in data and "documentation_url" in data:
             return f"Error: {data['message']}"
@@ -61,7 +65,7 @@ def _fmt(raw: str) -> str:
             for i in items[:10]:
                 n = i.get("full_name") or i.get("name") or i.get("login", "?")
                 u = i.get("html_url") or ""
-                lines.append(f"  {n}  {u}")
+                lines.append(f"  {n} {u}")
             if len(items) > 10:
                 lines.append(f"  ... and {len(items) - 10} more")
             return "\n".join(lines)
@@ -71,13 +75,13 @@ def _fmt(raw: str) -> str:
             if k in data:
                 v = data[k]
                 if k == "full_name":
-                    return f"{v}  {data.get('html_url', '')}"
+                    return f"{v} {data.get('html_url', '')}"
                 if k == "sha":
                     return f"sha: {v}"
                 if k == "name":
-                    return f"{v}  {data.get('html_url', '')}"
+                    return f"{v} {data.get('html_url', '')}"
         if "commit" in data and "sha" in data:
-            return f"sha: {data['sha']}  {data['commit'].get('message','')[:60]}"
+            return f"sha: {data['sha']} {data['commit'].get('message','')[:60]}"
         if "id" in data:
             for k in ["title", "name", "login", "message"]:
                 if k in data:
@@ -88,7 +92,7 @@ def _fmt(raw: str) -> str:
         for item in data[:20]:
             n = item.get("full_name") or item.get("name") or item.get("title") or item.get("filename") or item.get("login", "?")
             u = item.get("html_url") or ""
-            lines.append(f"  {n}  {u}")
+            lines.append(f"  {n} {u}")
         if len(data) > 20:
             lines.append(f"  ... and {len(data) - 20} more")
         return "\n".join(lines) if lines else "Empty list"
@@ -96,8 +100,7 @@ def _fmt(raw: str) -> str:
 
 
 # ============================================================
-# Tools — 注意：函数参数名不要跟任何可能的系统保留字冲突
-# 解决方案：全部使用 **kwargs 手动提取
+# Tools — 使用 **kwargs 手动提取，避免关键字冲突
 # ============================================================
 
 @register.tool(
@@ -152,7 +155,6 @@ async def github_get(*args, **kw):
     i = kw.get("i", 0)
     n = kw.get("n", 0)
     b = kw.get("b", "main")
-
     ep_map = {
         "contents": f"/repos/{o}/{r}/contents/{p}?ref={b}",
         "issue": f"/repos/{o}/{r}/issues/{i}",
@@ -195,7 +197,6 @@ async def github_list(*args, **kw):
     s = kw.get("s", "open")
     b = kw.get("b", "main")
     n = min(kw.get("n", 20), 100)
-
     ep_map = {
         "commits": f"/repos/{o}/{r}/commits?sha={b}&per_page={n}",
         "issues": f"/repos/{o}/{r}/issues?state={s}&per_page={n}",
@@ -270,7 +271,6 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url("/user/repos")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "file":
         encoded = base64.b64encode(ct.encode()).decode()
         d = {"message": msg or f"Update {pp}", "content": encoded, "branch": br}
@@ -279,7 +279,6 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/contents/{pp}")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "issue":
         d = {"title": ti}
         if bd:
@@ -291,7 +290,6 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "pull_request":
         d = {"title": ti, "head": hd, "base": ba}
         if bd:
@@ -301,7 +299,6 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "branch":
         src = fb or br
         rc2, ref_out = _curl(["-H", _auth(), _url(f"/repos/{o}/{r}/git/refs/heads/{src}")])
@@ -315,20 +312,17 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/git/refs")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "pull_request_review":
         d = {"body": bd or "", "event": ev or "COMMENT"}
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls/{pn}/reviews")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "star":
         rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Length: 0",
                          _url(f"/user/starred/{o}/{r}")])
         if rc == 0:
             return f"⭐ Starred {o}/{r} successfully"
         return f"Star failed (code {rc}): {out[:200]}"
-
     return f"Unknown action: {act}"
 
 
@@ -361,8 +355,8 @@ async def github_update(*args, **kw):
     act = kw.get("act", "")
     o = kw.get("o", "")
     r = kw.get("r", "")
-    inn = kw.get("in", 0)  # issue number
-    pn = kw.get("pn", 0)   # PR number
+    inn = kw.get("in", 0)
+    pn = kw.get("pn", 0)
     ti = kw.get("ti", "")
     bd = kw.get("bd", "")
     st = kw.get("st", "")
@@ -390,7 +384,6 @@ async def github_update(*args, **kw):
         rc, out = _curl(["-X", "PATCH", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues/{inn}")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "pull_request_branch":
         d = {}
         if sh:
@@ -399,7 +392,6 @@ async def github_update(*args, **kw):
                          "-d", json.dumps(d) if d else "{}",
                          _url(f"/repos/{o}/{r}/pulls/{pn}/update-branch")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     return f"Unknown action: {act}"
 
 
@@ -458,13 +450,11 @@ async def github_mutation(*args, **kw):
                 s = out[:100]
             results.append(f"  {fp}: {s}")
         return "Files:\n" + "\n".join(results)
-
     elif act == "issue_comment":
         d = {"body": bd}
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/issues/{inn}/comments")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     elif act == "pull_request":
         d = {"merge_method": mm}
         if ct:
@@ -474,7 +464,6 @@ async def github_mutation(*args, **kw):
         rc, out = _curl(["-X", "PUT", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/pulls/{pn}/merge")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
-
     return f"Unknown action: {act}"
 
 
@@ -507,16 +496,40 @@ async def github_fork(*args, **kw):
     return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
 
 
+async def _monitor_notify(summary: str, msg_type: str, target: str):
+    """监控器通知回调——发送到指定会话"""
+    try:
+        from core.server import app
+        from core.utils.session import SessionUtils
+        sess = SessionUtils.parse(target)
+        if sess:
+            await app.bus.emit("message.send", {
+                "session": sess,
+                "message": f"[GitHub Monitor]\n{summary}"
+            })
+    except Exception as e:
+        logger.error(f"[Monitor] notify failed: {e}")
+
+
 class GitHubToolPlugin(BasePlugin):
-    """GitHub Tool Plugin — curl直接调用GitHub API"""
+    """GitHub Tool Plugin — curl直接调用GitHub API + 自动监控"""
 
     async def initialize(self):
-        global _github_token
+        global _github_token, _monitor
         _github_token = self.plugin_cfg.get("github_token", "")
+
         if _github_token:
             logger.info(f"GitHub Tool ready (token: {_github_token[:6]}...{_github_token[-4:]})")
         else:
             logger.warning("GitHub Tool loaded but no token configured")
 
+        # 启动后台监控
+        _monitor = GitHubMonitor(self, _github_token, notify_cb=_monitor_notify)
+        await _monitor.start()
+
     async def terminate(self):
+        global _monitor
+        if _monitor:
+            await _monitor.stop()
+            _monitor = None
         logger.info("GitHub Tool terminated")
