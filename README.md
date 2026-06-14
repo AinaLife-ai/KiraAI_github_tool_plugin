@@ -2,6 +2,7 @@
 
 curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。  
 内置 **Auto-Watch 后台监控**，定时检查 PR/Issue 动态。
+支持全量搜索模式，自动覆盖所有仓库。
 
 ## 功能
 
@@ -21,9 +22,9 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 ### 工作流程
 
-1. 按设定的间隔扫描所有自有仓库 + 额外指定的仓库
-2. 检查 open PR 中作者为自己的那些，获取新的 review comments
-3. 检查 assign 给自己的 Issue 的新回复
+1. 按设定的间隔或固定时间扫描
+2. **搜索模式（推荐）**：通过 Search API 全量扫描所有你提的 PR 和 Issue，无需配置仓库列表
+3. **仓库模式**：按配置的仓库列表逐个扫描
 4. 发现有新动态：
    - **require_confirm=true（默认）** → 发送摘要到指定会话，等主人确认
    - **auto_fix=true + require_confirm=false** → 自动分析意见并修改代码推送新 commit
@@ -32,15 +33,26 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 | 配置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `watch_enabled` | bool | false | 总开关 |
-| `watch_interval_type` | select | interval | interval=间隔模式 / fixed_time=定时模式 |
-| `watch_interval_minutes` | int | 60 | 检查间隔（分钟），最小5分钟 |
-| `watch_own_repos` | bool | true | 自动监控 token 用户的所有自有仓库 |
-| `watch_repos` | string | "" | 额外监控仓库，逗号分隔（owner/repo） |
-| `watch_issues` | bool | true | 同时监控 Issue 回复 |
-| `watch_auto_fix` | bool | false | 收到 review 后自动修改代码 |
-| `watch_require_confirm` | bool | true | 自动操作前是否需要确认 |
-| `watch_notify_target` | string | "" | 通知目标会话（qq:dm:QQ号 / qq:gm:群号） |
+| `watch_enabled` | switch | false | 总开关 |
+| `watch_search_mode` | switch | false | 全量搜索模式：直接搜所有我提的PR/Issue，不依赖仓库列表 |
+| `watch_interval_type` | select | interval | interval=固定间隔 / fixed_time=时间点模式 |
+| `watch_interval_minutes` | integer | 60 | ⏺ interval模式：检查间隔（分钟），最小5分钟 |
+| `watch_fixed_cron` | string | "0 9 * * *" | ⏺ fixed_time模式：cron表达式 |
+| `watch_own_repos` | switch | true | ⏺ 仓库模式：自动监控所有自有仓库 |
+| `watch_repos` | list | [] | ⏺ 仓库模式：额外监控仓库列表（每行一个 owner/repo） |
+| `watch_issues` | switch | true | 同时监控 Issue 回复 |
+| `watch_auto_fix` | switch | false | 收到 review 后自动修改代码 |
+| `watch_require_confirm` | switch | true | ⏺ auto_fix开启时：操作前是否需要确认 |
+| `watch_notify_target` | list | [] | 通知目标会话，每行一个（qq:dm:QQ号 / qq:gm:群号） |
+
+> ⏺ 标记的配置项会根据依赖条件动态显示/隐藏，界面更清爽
+
+### 配置联动说明
+
+- 选择「固定时间间隔」→ 只显示 `watch_interval_minutes`
+- 选择「固定时间点」→ 只显示 `watch_fixed_cron`
+- 开启「全量搜索模式」→ 隐藏仓库列表类配置
+- 开启「自动修复」→ 显示 `watch_require_confirm`
 
 ## 安装
 
