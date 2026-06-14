@@ -10,7 +10,7 @@
     },
     "watch_enabled": {
         "name": "启用自动监控",
-        "type": "boolean",
+        "type": "switch",
         "default": false,
         "hint": "是否开启PR/Issue自动检查",
         "locales": {
@@ -19,7 +19,7 @@
     },
     "watch_search_mode": {
         "name": "全量搜索模式",
-        "type": "boolean",
+        "type": "switch",
         "default": false,
         "hint": "开启后不按仓库列表扫描，直接搜所有我提的PR和Issue（跨仓库全量）",
         "locales": {
@@ -52,7 +52,7 @@
     },
     "watch_own_repos": {
         "name": "监控所有自有仓库",
-        "type": "boolean",
+        "type": "switch",
         "default": true,
         "hint": "自动监控token所属用户的所有仓库（search_mode关闭时生效）",
         "locales": {
@@ -61,16 +61,16 @@
     },
     "watch_repos": {
         "name": "额外监控仓库",
-        "type": "string",
-        "default": "",
-        "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo（search_mode关闭时生效）",
+        "type": "list",
+        "default": [],
+        "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）",
         "locales": {
-            "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，逗号分隔，格式: owner/repo, owner/repo（search_mode关闭时生效）" }
+            "zh": { "name": "额外监控仓库", "hint": "额外监控的仓库，每行一个，格式: owner/repo（search_mode关闭时生效）" }
         }
     },
     "watch_issues": {
         "name": "监控Issue",
-        "type": "boolean",
+        "type": "switch",
         "default": true,
         "hint": "是否同时监控Issue回复",
         "locales": {
@@ -79,7 +79,7 @@
     },
     "watch_auto_fix": {
         "name": "自动修复",
-        "type": "boolean",
+        "type": "switch",
         "default": false,
         "hint": "收到review意见后自动修改代码（需实现LLM分析逻辑）",
         "locales": {
@@ -88,7 +88,7 @@
     },
     "watch_require_confirm": {
         "name": "需要确认",
-        "type": "boolean",
+        "type": "switch",
         "default": true,
         "hint": "为true时只发通知不给执行，为false且auto_fix开启时自动修改",
         "locales": {
@@ -97,11 +97,11 @@
     },
     "watch_notify_target": {
         "name": "通知目标会话",
-        "type": "string",
-        "default": "",
-        "hint": "通知发送到哪个会话，格式: qq:dm:QQ号 或 qq:gm:群号，留空不发送",
+        "type": "list",
+        "default": [],
+        "hint": "通知目标会话ID，每行一个，格式: qq:dm:QQ号 或 qq:gm:群号",
         "locales": {
-            "zh": { "name": "通知目标会话", "hint": "通知发送到哪个会话，格式: qq:dm:QQ号 或 qq:gm:群号，留空不发送" }
+            "zh": { "name": "通知目标会话", "hint": "通知目标会话ID，每行一个，格式: qq:dm:QQ号 或 qq:gm:群号" }
         }
     }
 }
