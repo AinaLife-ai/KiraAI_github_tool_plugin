@@ -9,10 +9,11 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 | `github_search` | 搜仓库/代码/Issues/用户 |
 | `github_get` | 读文件内容、Issue 详情、PR 详情、PR 文件列表、状态、评论、Review |
 | `github_list` | 列 commits / issues / pull requests |
-| `github_create` | 创建仓库/文件/Issue/PR/分支/Review/Star |
+| `github_create` | 创建仓库/文件/Issue/PR/分支/Review/Star/Release |
 | `github_update` | 更新 Issue（标题/正文/状态/标签/指派人/里程碑）、更新 PR 分支 |
 | `github_mutation` | 批量文件操作、发 Issue 评论、合并 PR |
 | `github_fork` | Fork 仓库到个人或组织 |
+| `github_check_token` | 检查 GitHub Token 是否已配置（工具描述中已提示） |
 
 ## 安装
 
@@ -25,6 +26,7 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 - 在 GitHub 生成 Personal Access Token：`Settings → Developer settings → Personal access tokens → Tokens (classic)`
 - 勾选 `repo` 权限（完整 API 访问）
 - 复制 token 到 WebUI 插件页的 `GitHub Token` 输入框
+- 插件会在每轮对话开始时自动提示 AI token 已配置，无需您手动提供 token 参数
 
 ## 工作原理
 
