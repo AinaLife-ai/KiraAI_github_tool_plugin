@@ -1,7 +1,7 @@
 {
   "display_name": "GitHub Tool",
   "plugin_id": "github-tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "爱奈丽",
   "description": "curl直调GitHub REST API，覆盖search/get/list/create/update/mutation/fork全部操作，token在webui里配置，不需要MCP桥接层",
   "repo": "https://github.com/AinaLife-ai/KiraAI_github_tool_plugin",
