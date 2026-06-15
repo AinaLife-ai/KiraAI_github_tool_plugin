@@ -6,9 +6,11 @@ import sys
 from typing import Optional, Any
 from urllib.parse import quote
 
-from core.plugin import BasePlugin
+from core.plugin import BasePlugin, on, Priority
 from core.plugin.plugin_registry import register
 from core.logging_manager import get_logger
+from core.provider.llm_model import LLMRequest
+from core.prompt_manager import Prompt
 
 logger = get_logger("github-tool", "green")
 
@@ -40,7 +42,7 @@ def _auth() -> str:
 
 def _check() -> str:
     if not _github_token:
-        return "GitHub Token 未配置，请在 WebUI 插件设置中填写"
+        return "GitHub Token 未配置，请在 WebUI 插件设置中填写（已自动保存，无需每次提供）。"
     return ""
 
 
@@ -96,13 +98,32 @@ def _fmt(raw: str) -> str:
 
 
 # ============================================================
-# Tools — 注意：函数参数名不要跟任何可能的系统保留字冲突
-# 解决方案：全部使用 **kwargs 手动提取
+# 自检工具 — 让AI知道token已配置
+# ============================================================
+
+@register.tool(
+    name="github_check_token",
+    description="Check if GitHub token is configured. Returns 'Token ready' if configured, otherwise error message. Use this if you are unsure about token status.",
+    params={
+        "type": "object",
+        "properties": {},
+        "required": []
+    }
+)
+async def github_check_token(*args, **kw):
+    if _github_token:
+        return "✅ GitHub Token 已配置，可直接使用所有 GitHub 工具，无需提供 token 参数。"
+    else:
+        return "❌ GitHub Token 未配置，请在 WebUI 插件设置中填写 Personal Access Token（需要 repo 权限）。"
+
+
+# ============================================================
+# Tools — 注意：所有工具描述都明确提示 token 已配置
 # ============================================================
 
 @register.tool(
     name="github_search",
-    description="Search GitHub (repositories, code, issues, users). Use when user wants to search for repos, code, issues on GitHub. Returns concise token-efficient results.",
+    description="Search GitHub (repositories, code, issues, users). Token already configured, no need to provide it. Use when user wants to search for repos, code, issues on GitHub. Returns concise token-efficient results.",
     params={
         "type": "object",
         "properties": {
@@ -126,7 +147,7 @@ async def github_search(*args, **kw):
 
 @register.tool(
     name="github_get",
-    description="Get content from GitHub: file contents, issue details, pull request details, PR files, PR status, PR comments, PR reviews.",
+    description="Get content from GitHub: file contents, issue details, pull request details, PR files, PR status, PR comments, PR reviews. Token already configured.",
     params={
         "type": "object",
         "properties": {
@@ -171,7 +192,7 @@ async def github_get(*args, **kw):
 
 @register.tool(
     name="github_list",
-    description="List commits, issues or pull requests from a GitHub repository.",
+    description="List commits, issues or pull requests from a GitHub repository. Token already configured.",
     params={
         "type": "object",
         "properties": {
@@ -210,20 +231,20 @@ async def github_list(*args, **kw):
 
 @register.tool(
     name="github_create",
-    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, or pull request review.",
+    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, pull request review, star, or release. Token already configured.",
     params={
         "type": "object",
         "properties": {
-            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star"], "description": "What type of resource to create"},
+            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star", "release"], "description": "What type of resource to create"},
             "o": {"type": "string", "description": "Repository owner"},
             "r": {"type": "string", "description": "Repository name"},
-            "nm": {"type": "string", "description": "Name (repo name, branch name)"},
+            "nm": {"type": "string", "description": "Name (repo name, branch name, or release tag name)"},
             "pp": {"type": "string", "description": "File path (for file action)"},
             "ct": {"type": "string", "description": "File content (for file action) or body text"},
             "msg": {"type": "string", "description": "Commit message (for file action)"},
             "br": {"type": "string", "description": "Branch name", "default": "main"},
-            "ti": {"type": "string", "description": "Title (for issue/PR)"},
-            "bd": {"type": "string", "description": "Body text (for issue/PR/review)"},
+            "ti": {"type": "string", "description": "Title (for issue/PR/release)"},
+            "bd": {"type": "string", "description": "Body text (for issue/PR/release review)"},
             "hd": {"type": "string", "description": "Head branch (for PR)"},
             "ba": {"type": "string", "description": "Base branch (for PR)"},
             "pn": {"type": "integer", "description": "PR number (for review)"},
@@ -234,7 +255,11 @@ async def github_list(*args, **kw):
             "ev": {"type": "string", "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"], "description": "Review event type"},
             "lb": {"type": "array", "items": {"type": "string"}, "description": "Labels to apply"},
             "as": {"type": "array", "items": {"type": "string"}, "description": "Users to assign"},
-            "fb": {"type": "string", "description": "Source branch to fork from (for branch creation)"}
+            "fb": {"type": "string", "description": "Source branch to fork from (for branch creation)"},
+            # Release specific
+            "target": {"type": "string", "description": "Commit SHA or branch name for the release (default: default branch)"},
+            "draft": {"type": "boolean", "description": "Is draft release?", "default": False},
+            "prerelease": {"type": "boolean", "description": "Is prerelease?", "default": False}
         },
         "required": ["act"]
     }
@@ -264,6 +289,9 @@ async def github_create(*args, **kw):
     lb = kw.get("lb", None)
     as_ = kw.get("as", None)
     fb = kw.get("fb", "")
+    target = kw.get("target", "")
+    draft = kw.get("draft", False)
+    prerelease = kw.get("prerelease", False)
 
     if act == "repository":
         d = {"name": nm, "description": desc, "private": pv}
@@ -329,12 +357,23 @@ async def github_create(*args, **kw):
             return f"⭐ Starred {o}/{r} successfully"
         return f"Star failed (code {rc}): {out[:200]}"
 
+    elif act == "release":
+        # nm is tag name (required)
+        if not nm:
+            return "Missing required parameter: nm (tag name)"
+        d = {"tag_name": nm, "name": ti or nm, "body": bd or "", "draft": draft, "prerelease": prerelease}
+        if target:
+            d["target_commitish"] = target
+        rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
+                         "-d", json.dumps(d), _url(f"/repos/{o}/{r}/releases")])
+        return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
+
     return f"Unknown action: {act}"
 
 
 @register.tool(
     name="github_update",
-    description="Update a GitHub issue (title, body, state, labels, assignees, milestone) or update a pull request branch.",
+    description="Update a GitHub issue (title, body, state, labels, assignees, milestone) or update a pull request branch. Token already configured.",
     params={
         "type": "object",
         "properties": {
@@ -405,7 +444,7 @@ async def github_update(*args, **kw):
 
 @register.tool(
     name="github_mutation",
-    description="Perform batched mutations: create/update multiple files, add issue comment, or merge a pull request.",
+    description="Perform batched mutations: create/update multiple files, add issue comment, or merge a pull request. Token already configured.",
     params={
         "type": "object",
         "properties": {
@@ -480,7 +519,7 @@ async def github_mutation(*args, **kw):
 
 @register.tool(
     name="github_fork",
-    description="Fork a GitHub repository to your personal account or a specified organization.",
+    description="Fork a GitHub repository to your personal account or a specified organization. Token already configured.",
     params={
         "type": "object",
         "properties": {
@@ -514,9 +553,32 @@ class GitHubToolPlugin(BasePlugin):
         global _github_token
         _github_token = self.plugin_cfg.get("github_token", "")
         if _github_token:
-            logger.info(f"GitHub Tool ready (token: {_github_token[:6]}...{_github_token[-4:]})")
+            logger.info(f"GitHub Tool ready (token configured)")
         else:
             logger.warning("GitHub Tool loaded but no token configured")
 
     async def terminate(self):
         logger.info("GitHub Tool terminated")
+
+    # ============================================================
+    # 新增：每次请求注入 token 已配置的提示
+    # ============================================================
+    @on.llm_request(priority=Priority.HIGH)
+    async def inject_token_hint(self, event, req: LLMRequest, *args, **kwargs):
+        """在每次 LLM 请求中注入 GitHub token 已配置的提示，避免 AI 遗忘"""
+        if not _github_token:
+            return  # token 未配置时不注入提示
+        # 避免重复添加
+        for p in req.system_prompt:
+            if p.name == "github_token_hint":
+                return
+        hint = Prompt(
+            "【GitHub Token 状态】GitHub Personal Access Token 已在插件配置中设置完毕且有效。"
+            "你在调用任何 GitHub 工具时，都无需提供 token 参数，插件会自动携带 token 进行认证。"
+            "如果对 token 状态有疑问，可以调用 github_check_token 工具确认。",
+            name="github_token_hint",
+            source="github-tool",
+            persist=False  # 不保存到对话历史
+        )
+        req.system_prompt.append(hint)
+        logger.debug("已注入 GitHub token 提示到 system prompt")
