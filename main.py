@@ -16,7 +16,7 @@ logger = get_logger("github-tool", "green")
 
 _github_token: str = ""
 _github_user: str = ""
-_file_max_chars: int = 5000
+_file_max_chars: int = 10000  # 默认改为 10000
 _expose_token: bool = False
 
 # Windows用curl.exe，其他平台（Linux/macOS）用curl
@@ -200,7 +200,7 @@ async def github_check_token(*args, **kw):
             "r": {"type": "string", "description": "Repository name"},
             "p": {"type": "string", "description": "File path (e.g. src/main.py)"},
             "b": {"type": "string", "description": "Branch ref (default: main)", "default": "main"},
-            "limit": {"type": "integer", "description": "Max characters to return (default: 5000, configurable in plugin settings)"},
+            "limit": {"type": "integer", "description": "Max characters to return (default: 10000, configurable in plugin settings)"},
             "offset": {"type": "integer", "description": "Character offset to start reading (for pagination, default: 0)"}
         },
         "required": ["o", "r", "p"]
@@ -346,11 +346,11 @@ async def github_list(*args, **kw):
 
 @register.tool(
     name="github_create",
-    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, pull request review, star, or release.",
+    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, pull request review, star, release, or delete a branch.",
     params={
         "type": "object",
         "properties": {
-            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star", "release"], "description": "What type of resource to create"},
+            "act": {"type": "string", "enum": ["repository", "file", "issue", "pull_request", "branch", "pull_request_review", "star", "release", "delete_branch"], "description": "What type of resource to create or delete"},
             "o": {"type": "string", "description": "Repository owner"},
             "r": {"type": "string", "description": "Repository name"},
             "nm": {"type": "string", "description": "Name (repo name, branch name, or release tag name)"},
@@ -480,6 +480,15 @@ async def github_create(*args, **kw):
         rc, out = _curl(["-X", "POST", "-H", _auth(), "-H", "Content-Type: application/json",
                          "-d", json.dumps(d), _url(f"/repos/{o}/{r}/releases")])
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
+
+    elif act == "delete_branch":
+        if not o or not r or not nm:
+            return "Missing required parameters: o (owner), r (repo), nm (branch name)"
+        rc, out = _curl(["-X", "DELETE", "-H", _auth(), _url(f"/repos/{o}/{r}/git/refs/heads/{nm}")])
+        if rc == 0:
+            return f"✅ Branch '{nm}' deleted successfully from {o}/{r}"
+        else:
+            return f"Delete failed (code {rc}): {out[:200]}"
 
     return f"Unknown action: {act}"
 
@@ -663,7 +672,7 @@ class GitHubToolPlugin(BasePlugin):
     async def initialize(self):
         global _github_token, _github_user, _file_max_chars, _expose_token
         _github_token = self.plugin_cfg.get("github_token", "")
-        _file_max_chars = int(self.plugin_cfg.get("file_content_max_chars", 5000))
+        _file_max_chars = int(self.plugin_cfg.get("file_content_max_chars", 10000))  # 默认改为10000
         _expose_token = bool(self.plugin_cfg.get("expose_token_in_check", False))
 
         if _github_token:
