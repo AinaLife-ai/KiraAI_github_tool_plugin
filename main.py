@@ -15,6 +15,9 @@ from core.prompt_manager import Prompt
 logger = get_logger("github-tool", "green")
 
 _github_token: str = ""
+_github_user: str = ""
+_file_max_chars: int = 5000
+_expose_token: bool = False
 
 # Windows用curl.exe，其他平台（Linux/macOS）用curl
 _CURL_CMD = "curl.exe" if sys.platform == "win32" else "curl"
@@ -97,8 +100,67 @@ def _fmt(raw: str) -> str:
     return str(data)[:500]
 
 
+def _fmt_file_content(raw: str, max_chars: int, offset: int = 0) -> str:
+    if not raw:
+        return "No output"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw[:500]
+
+    if not isinstance(data, dict):
+        return json.dumps(data, ensure_ascii=False)[:500]
+
+    if "message" in data and "documentation_url" in data:
+        return f"Error: {data['message']}"
+
+    content = data.get("content")
+    if not content:
+        return "File content not found or empty"
+
+    sha = data.get("sha", "unknown")
+    encoding = data.get("encoding", "base64")
+    name = data.get("name", "")
+    path = data.get("path", "")
+    size = data.get("size", 0)
+
+    if encoding != "base64":
+        return f"Unsupported encoding: {encoding}"
+
+    try:
+        decoded = base64.b64decode(content).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Failed to decode file content: {e}"
+
+    total_chars = len(decoded)
+    if offset >= total_chars:
+        return (f"📄 文件: {path}\n"
+                f"名称: {name}\n"
+                f"SHA: {sha}\n"
+                f"总字符数: {total_chars}\n"
+                f"偏移量 {offset} 已超出文件结尾，无更多内容。")
+
+    end_pos = min(offset + max_chars, total_chars)
+    display_content = decoded[offset:end_pos]
+    has_more = end_pos < total_chars
+    read_chars = len(display_content)
+
+    result = (f"📄 文件: {path}\n"
+              f"名称: {name}\n"
+              f"SHA: {sha}\n"
+              f"总字符数: {total_chars}\n"
+              f"本次读取: {offset} → {end_pos} (共 {read_chars} 字符)\n"
+              f"还有更多: {'是' if has_more else '否'}\n"
+              f"\n--- 内容开始 ---\n{display_content}\n--- 内容结束 ---")
+
+    if has_more:
+        result += f"\n\n💡 提示: 文件还有 {total_chars - end_pos} 字符未读。如需继续，请使用相同的参数并设置 offset={end_pos}。"
+
+    return result
+
+
 # ============================================================
-# 自检工具 — 让AI知道token已配置
+# 自检工具
 # ============================================================
 
 @register.tool(
@@ -112,18 +174,71 @@ def _fmt(raw: str) -> str:
 )
 async def github_check_token(*args, **kw):
     if _github_token:
-        return "✅ GitHub Token 已配置，可直接使用所有 GitHub 工具，无需提供 token 参数。"
+        msg = f"✅ GitHub Token 已配置，当前登录账号为 {_github_user or '未知'}。"
+        if _expose_token:
+            msg += f"\n\n⚠️ 【明文 Token】{_github_token}\n\n此 Token 仅用于调试，请勿分享或记录到对话日志中。"
+        return msg
     else:
         return "❌ GitHub Token 未配置，请在 WebUI 插件设置中填写 Personal Access Token（需要 repo 权限）。"
 
 
 # ============================================================
-# Tools — 注意：所有工具描述都明确提示 token 已配置
+# 读取文件内容工具（支持分页）
+# ============================================================
+
+@register.tool(
+    name="github_read_file",
+    description=(
+        "Read the content of a file from a GitHub repository. Decodes Base64 content and returns the actual text/code. "
+        "Supports pagination via offset and limit. Use this when you need to see what's inside a file before modifying it. "
+        "Example: first call with limit=5000, then if '还有更多' is '是', call again with offset=5000 (or the suggested offset) to read the next part."
+    ),
+    params={
+        "type": "object",
+        "properties": {
+            "o": {"type": "string", "description": "Repository owner (username or organization)"},
+            "r": {"type": "string", "description": "Repository name"},
+            "p": {"type": "string", "description": "File path (e.g. src/main.py)"},
+            "b": {"type": "string", "description": "Branch ref (default: main)", "default": "main"},
+            "limit": {"type": "integer", "description": "Max characters to return (default: 5000, configurable in plugin settings)"},
+            "offset": {"type": "integer", "description": "Character offset to start reading (for pagination, default: 0)"}
+        },
+        "required": ["o", "r", "p"]
+    }
+)
+async def github_read_file(*args, **kw):
+    err = _check()
+    if err:
+        return err
+
+    o = kw.get("o", "")
+    r = kw.get("r", "")
+    p = kw.get("p", "")
+    b = kw.get("b", "main")
+    limit = kw.get("limit", _file_max_chars)
+    offset = kw.get("offset", 0)
+
+    if not o or not r or not p:
+        return "Missing required parameters: o (owner), r (repo), p (path)"
+
+    if limit < 1:
+        return "limit must be at least 1"
+    if offset < 0:
+        return "offset must be >= 0"
+
+    rc, out = _curl(["-H", _auth(), _url(f"/repos/{o}/{r}/contents/{p}?ref={b}")])
+    if rc != 0:
+        return f"curl failed with code {rc}"
+    return _fmt_file_content(out, limit, offset)
+
+
+# ============================================================
+# 其他工具
 # ============================================================
 
 @register.tool(
     name="github_search",
-    description="Search GitHub (repositories, code, issues, users). Token already configured, no need to provide it. Use when user wants to search for repos, code, issues on GitHub. Returns concise token-efficient results.",
+    description="Search GitHub (repositories, code, issues, users). Token already configured, no need to provide it.",
     params={
         "type": "object",
         "properties": {
@@ -147,12 +262,12 @@ async def github_search(*args, **kw):
 
 @register.tool(
     name="github_get",
-    description="Get content from GitHub: file contents, issue details, pull request details, PR files, PR status, PR comments, PR reviews. Token already configured.",
+    description="Get metadata from GitHub: file SHA, issue details, pull request details, PR files, PR status, PR comments, PR reviews. For reading actual file content, use github_read_file instead.",
     params={
         "type": "object",
         "properties": {
             "t": {"type": "string", "enum": ["contents", "issue", "pull_request", "pull_request_files", "pull_request_status", "pull_request_comments", "pull_request_reviews"], "description": "Type of resource to get"},
-            "o": {"type": "string", "description": "Repository owner (username or organization)"},
+            "o": {"type": "string", "description": "Repository owner"},
             "r": {"type": "string", "description": "Repository name"},
             "p": {"type": "string", "description": "File path (for contents)"},
             "i": {"type": "integer", "description": "Issue number"},
@@ -192,7 +307,7 @@ async def github_get(*args, **kw):
 
 @register.tool(
     name="github_list",
-    description="List commits, issues or pull requests from a GitHub repository. Token already configured.",
+    description="List commits, issues or pull requests from a GitHub repository.",
     params={
         "type": "object",
         "properties": {
@@ -231,7 +346,7 @@ async def github_list(*args, **kw):
 
 @register.tool(
     name="github_create",
-    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, pull request review, star, or release. Token already configured.",
+    description="Create GitHub resources: repository, file (create/update), issue, pull request, branch, pull request review, star, or release.",
     params={
         "type": "object",
         "properties": {
@@ -256,7 +371,6 @@ async def github_list(*args, **kw):
             "lb": {"type": "array", "items": {"type": "string"}, "description": "Labels to apply"},
             "as": {"type": "array", "items": {"type": "string"}, "description": "Users to assign"},
             "fb": {"type": "string", "description": "Source branch to fork from (for branch creation)"},
-            # Release specific
             "target": {"type": "string", "description": "Commit SHA or branch name for the release (default: default branch)"},
             "draft": {"type": "boolean", "description": "Is draft release?", "default": False},
             "prerelease": {"type": "boolean", "description": "Is prerelease?", "default": False}
@@ -358,7 +472,6 @@ async def github_create(*args, **kw):
         return f"Star failed (code {rc}): {out[:200]}"
 
     elif act == "release":
-        # nm is tag name (required)
         if not nm:
             return "Missing required parameter: nm (tag name)"
         d = {"tag_name": nm, "name": ti or nm, "body": bd or "", "draft": draft, "prerelease": prerelease}
@@ -373,7 +486,7 @@ async def github_create(*args, **kw):
 
 @register.tool(
     name="github_update",
-    description="Update a GitHub issue (title, body, state, labels, assignees, milestone) or update a pull request branch. Token already configured.",
+    description="Update a GitHub issue (title, body, state, labels, assignees, milestone) or update a pull request branch.",
     params={
         "type": "object",
         "properties": {
@@ -400,8 +513,8 @@ async def github_update(*args, **kw):
     act = kw.get("act", "")
     o = kw.get("o", "")
     r = kw.get("r", "")
-    inn = kw.get("in", 0)  # issue number
-    pn = kw.get("pn", 0)   # PR number
+    inn = kw.get("in", 0)
+    pn = kw.get("pn", 0)
     ti = kw.get("ti", "")
     bd = kw.get("bd", "")
     st = kw.get("st", "")
@@ -444,7 +557,7 @@ async def github_update(*args, **kw):
 
 @register.tool(
     name="github_mutation",
-    description="Perform batched mutations: create/update multiple files, add issue comment, or merge a pull request. Token already configured.",
+    description="Perform batched mutations: create/update multiple files, add issue comment, or merge a pull request.",
     params={
         "type": "object",
         "properties": {
@@ -519,7 +632,7 @@ async def github_mutation(*args, **kw):
 
 @register.tool(
     name="github_fork",
-    description="Fork a GitHub repository to your personal account or a specified organization. Token already configured.",
+    description="Fork a GitHub repository to your personal account or a specified organization.",
     params={
         "type": "object",
         "properties": {
@@ -547,38 +660,55 @@ async def github_fork(*args, **kw):
 
 
 class GitHubToolPlugin(BasePlugin):
-    """GitHub Tool Plugin — curl直接调用GitHub API"""
-
     async def initialize(self):
-        global _github_token
+        global _github_token, _github_user, _file_max_chars, _expose_token
         _github_token = self.plugin_cfg.get("github_token", "")
+        _file_max_chars = int(self.plugin_cfg.get("file_content_max_chars", 5000))
+        _expose_token = bool(self.plugin_cfg.get("expose_token_in_check", False))
+
         if _github_token:
-            logger.info(f"GitHub Tool ready (token configured)")
+            rc, out = _curl(["-H", _auth(), _url("/user")])
+            if rc == 0:
+                try:
+                    data = json.loads(out)
+                    if "login" in data:
+                        _github_user = data["login"]
+                        logger.info(f"GitHub Tool ready, logged in as {_github_user}")
+                    else:
+                        logger.warning("GitHub Token 有效但未能解析用户名")
+                except json.JSONDecodeError:
+                    logger.warning("GitHub Token 有效但响应解析失败")
+            else:
+                logger.warning(f"GitHub Token 可能无效，/user 返回 code {rc}")
         else:
             logger.warning("GitHub Tool loaded but no token configured")
+
+        if _expose_token:
+            logger.warning("⚠️ expose_token_in_check 已开启，github_check_token 将返回明文 Token，请注意安全！")
 
     async def terminate(self):
         logger.info("GitHub Tool terminated")
 
-    # ============================================================
-    # 新增：每次请求注入 token 已配置的提示
-    # ============================================================
     @on.llm_request(priority=Priority.HIGH)
     async def inject_token_hint(self, event, req: LLMRequest, *args, **kwargs):
-        """在每次 LLM 请求中注入 GitHub token 已配置的提示，避免 AI 遗忘"""
         if not _github_token:
-            return  # token 未配置时不注入提示
-        # 避免重复添加
+            return
         for p in req.system_prompt:
             if p.name == "github_token_hint":
                 return
+
+        hint_text = "【GitHub Token 状态】GitHub Personal Access Token 已在插件配置中设置完毕且有效。"
+        if _github_user:
+            hint_text += f" 当前登录的 GitHub 账号为: {_github_user}。"
+        else:
+            hint_text += " 但未能获取用户名，请检查 Token 是否有效。"
+        hint_text += " 你在调用任何 GitHub 工具时，都无需提供 token 参数，插件会自动携带 token 进行认证。如果对 token 状态有疑问，可以调用 github_check_token 工具确认。"
+
         hint = Prompt(
-            "【GitHub Token 状态】GitHub Personal Access Token 已在插件配置中设置完毕且有效。"
-            "你在调用任何 GitHub 工具时，都无需提供 token 参数，插件会自动携带 token 进行认证。"
-            "如果对 token 状态有疑问，可以调用 github_check_token 工具确认。",
+            hint_text,
             name="github_token_hint",
             source="github-tool",
-            persist=False  # 不保存到对话历史
+            persist=False
         )
         req.system_prompt.append(hint)
         logger.debug("已注入 GitHub token 提示到 system prompt")
