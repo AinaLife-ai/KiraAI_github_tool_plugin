@@ -1,7 +1,7 @@
 {
     "github_token": {
         "name": "GitHub Token",
-        "type": "string",
+        "type": "sensitive",
         "default": "",
         "hint": "GitHub Personal Access Token (需有repo权限)",
         "locales": {
@@ -31,6 +31,18 @@
             "zh": {
                 "name": "在 github_check_token 中返回明文 Token",
                 "hint": "启用后，调用 github_check_token 时会返回完整的 Token（明文），仅用于调试或需要 Token 的场景。请谨慎开启。"
+            }
+        }
+    },
+    "enable_delete_repository": {
+        "name": "允许删除仓库",
+        "type": "switch",
+        "default": false,
+        "hint": "启用后，AI 可通过 github_create(act=delete_repository) 删除整个仓库，操作不可逆！默认关闭，强烈建议保持关闭，仅在确有需要时临时开启。Token 还需 delete_repo 权限（细粒度 token 需 Administration 写权限）。",
+        "locales": {
+            "zh": {
+                "name": "允许删除仓库",
+                "hint": "启用后，AI 可通过 github_create(act=delete_repository) 删除整个仓库，操作不可逆！默认关闭，强烈建议保持关闭，仅在确有需要时临时开启。Token 还需 delete_repo 权限（细粒度 token 需 Administration 写权限）。"
             }
         }
     }
