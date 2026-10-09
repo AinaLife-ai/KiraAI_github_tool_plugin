@@ -3,11 +3,12 @@ import base64
 import json
 import subprocess
 import sys
-from typing import Optional, Any
+from typing import Optional
 from urllib.parse import quote
 
-from core.plugin import BasePlugin, on, Priority
-from core.plugin.plugin_registry import register
+# register 走包级导出：2.x 与 3.0 的 core/plugin/__init__ 均导出 register
+# （3.0 已将 core/plugin/plugin_registry.py 重构为 registry.py，旧子模块路径在 3.0 不存在）
+from core.plugin import BasePlugin, on, Priority, register
 from core.logging_manager import get_logger
 from core.provider.llm_model import LLMRequest
 from core.prompt_manager import Prompt
@@ -36,6 +37,11 @@ def _curl(args: list, timeout: int = 60, data: Optional[str] = None) -> tuple:
             timeout=timeout,
         )
         out = r.stdout.decode("utf-8", errors="replace").strip()
+        if r.returncode != 0:
+            # 传输层失败（DNS/代理/连接被拒等）时 stderr 才有根因，此前被丢弃导致无法诊断
+            err_msg = r.stderr.decode("utf-8", errors="replace").strip()
+            if err_msg:
+                logger.warning(f"curl 传输失败 rc={r.returncode}: {err_msg[:300]}")
         return r.returncode, out
     except subprocess.TimeoutExpired:
         return -1, '{"message": "curl timeout", "documentation_url": ""}'
@@ -75,10 +81,10 @@ async def _req(method: str, path: str, body: Optional[dict] = None, timeout: int
     return await _acurl(args + [_url(path)], timeout=timeout, data=data)
 
 
-async def _default_branch(o: str, r: str) -> str:
-    """获取仓库默认分支（带缓存），失败返回空串。"""
+async def _default_branch(o: str, r: str, refresh: bool = False) -> str:
+    """获取仓库默认分支（带缓存），失败返回空串。refresh=True 绕过缓存（用于失败自愈）。"""
     key = f"{o}/{r}"
-    if key in _default_branch_cache:
+    if not refresh and key in _default_branch_cache:
         return _default_branch_cache[key]
     rc, out = await _req("GET", f"/repos/{o}/{r}")
     if rc == 0:
@@ -162,6 +168,9 @@ def _fmt(raw: str) -> str:
     elif isinstance(data, list):
         lines = []
         for item in data[:20]:
+            if not isinstance(item, dict):
+                lines.append(f"  {str(item)[:80]}")
+                continue
             n = (item.get("full_name") or item.get("name") or item.get("filename")
                  or item.get("login"))
             if not n and "title" in item:
@@ -201,7 +210,6 @@ def _fmt_file_content(raw: str, max_chars: int, offset: int = 0) -> str:
     encoding = data.get("encoding", "base64")
     name = data.get("name", "")
     path = data.get("path", "")
-    size = data.get("size", 0)
 
     if encoding != "base64":
         return f"Unsupported encoding: {encoding}"
@@ -310,12 +318,12 @@ async def github_read_file(*args, **kw):
     rc, out = await _req("GET", f"/repos/{o}/{r}/contents/{quote(p)}?ref={quote(b)}")
     if rc != 0:
         return f"curl failed with code {rc}"
-    if '"No commit found for the ref"' in out:
-        # 显式指定的分支不存在，回退到默认分支再试一次
-        db = await _default_branch(o, r)
+    if "No commit found for the ref" in out:  # 真实报文无紧贴引号（"…ref <name>"），带引号永远匹配不到
+        # 分支不存在（或缓存的默认分支已过期），强制刷新后回退到默认分支再试一次
+        db = await _default_branch(o, r, refresh=True)
         if db and db != b:
             rc, out = await _req("GET", f"/repos/{o}/{r}/contents/{quote(p)}?ref={quote(db)}")
-            if rc == 0 and '"No commit found for the ref"' not in out:
+            if rc == 0 and "No commit found for the ref" not in out:
                 res = _fmt_file_content(out, limit, offset)
                 return f"⚠️ 分支 {b} 不存在，已自动改用默认分支 {db}。\n\n" + res
     return _fmt_file_content(out, limit, offset)
@@ -578,6 +586,8 @@ async def github_create(*args, **kw):
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
 
     elif act == "pull_request_review":
+        if not pn:
+            return "act=pull_request_review 缺少必填参数: pn (PR 编号)"
         d = {"body": bd or "", "event": ev or "COMMENT"}
         rc, out = await _req("POST", f"/repos/{o}/{r}/pulls/{pn}/reviews", d)
         return _fmt(out) if rc == 0 else f"curl failed with code {rc}"
@@ -617,15 +627,6 @@ async def github_create(*args, **kw):
             return f"curl failed with code {rc}"
         res = _fmt(out)
         return f"✅ 文件已删除 ({o}/{r}:{br_eff}:{p})\n{res}" if not res.startswith("Error") else res
-
-    elif act == "delete_repository":
-        if not o or not r:
-            return "act=delete_repository 缺少必填参数: o (owner), r (repo)"
-        rc, out = await _req("DELETE", f"/repos/{o}/{r}")
-        # 成功返回 204 空 body
-        if rc == 0 and (not out or '"message"' not in out):
-            return f"✅ 仓库 {o}/{r} 已删除（不可逆）"
-        return f"删除仓库失败: {_fmt(out)}"
 
     elif act == "delete_repository":
         if not _allow_delete_repo:
@@ -802,6 +803,13 @@ async def github_mutation(*args, **kw):
         if not fs:
             return "No files specified"
         br_eff = await _resolve_branch(o, r, br)
+        # sha 预取并发化：只读、保序，N 个文件省 N-1 个串行往返；
+        # PUT 仍逐个串行——同一分支的并发写会产生非快进冲突（409）
+        _paths = [f.get("p", "") for f in fs]
+        _dup = {p for p in set(_paths) if p and _paths.count(p) > 1}
+        _uniq = [p for p in dict.fromkeys(_paths) if p and p not in _dup]
+        _prefetched = dict(zip(_uniq, await asyncio.gather(
+            *(_get_file_sha(o, r, p, br_eff) for p in _uniq)))) if _uniq else {}
         results = []
         for f in fs:
             fp = f.get("p", "")
@@ -809,8 +817,8 @@ async def github_mutation(*args, **kw):
             if not fp:
                 results.append("  (unknown): ❌ 缺少文件路径 p")
                 continue
-            # 自动获取已有文件 sha：存在→更新，不存在→新建
-            sha = await _get_file_sha(o, r, fp, br_eff)
+            # 自动获取已有文件 sha：存在→更新，不存在→新建（重复路径逐个新鲜获取，与串行行为一致）
+            sha = _prefetched[fp] if fp in _prefetched else await _get_file_sha(o, r, fp, br_eff)
             d = {"message": msg or f"Update {fp}",
                  "content": base64.b64encode(fc.encode()).decode(),
                  "branch": br_eff}
