@@ -20,7 +20,7 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 1. 将 `github-tool` 文件夹放入 KiraAI 的 `data/plugins/` 目录
 2. 在 WebUI 插件设置中填写 `GitHub Token`（需 `repo` 权限）
-3. 可选调整 `文件内容最大返回字符数`（默认 5000）
+3. 可选调整 `文件内容最大返回字符数`（默认 10000）
 4. 可选开启 `在 github_check_token 中返回明文 Token`（默认关闭，仅调试使用）
 5. 重启 KiraAI，自动加载
 
@@ -53,6 +53,16 @@ curl 直调 GitHub REST API，零 MCP 桥接，WebUI 配置 token。
 
 <details>
 <summary>更新日志（点击展开）</summary>
+
+### v1.3.1
+
+- 兼容 KiraAI 3.0：`register` 改走包级导出（3.0 已将 `core/plugin/plugin_registry.py` 重构为 `registry.py`，旧导入路径在 3.0 直接 `ModuleNotFoundError`，插件无法加载）；2.x 行为不变
+- 修复「允许删除仓库」开关被旁路：`github_create` 中存在两个 `delete_repository` 分支，无门控的在前导致开关成为死代码（默认应关闭，实际始终可删）。已删除无门控分支，开关恢复正常
+- 修复分支不存在时自动回退默认分支从未生效：真实 API 报文为 `No commit found for the ref <分支名>`，原判断带了紧贴引号永远匹配不到（死代码）
+- 默认分支缓存自愈：缓存的默认分支在上游改名后，回退路径会拿到同一个过期值导致自愈失败；现在失败回退时强制刷新缓存（热路径缓存不受影响）
+- `github_mutation` 批量写提速：文件 SHA 预取并发化（只读、保序），N 个文件省 N-1 个串行往返；同分支 PUT 仍保持串行（避免并发写同一分支产生非快进冲突）
+- curl 传输层失败（DNS/代理/超时等）时把 stderr 根因写入日志，此前被捕获后丢弃，无法诊断
+- 其他：`pull_request_review` 补 `pn` 必填校验；`_fmt` 列表项非字典时不再报错；清理未使用的导入与变量
 
 ### v1.3.0
 
